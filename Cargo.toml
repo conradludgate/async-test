@@ -26,9 +26,3 @@ inventory = "0.3.6"
 [dev-dependencies]
 fastrand = "1.8.0"
 pretty_assertions = "1.2.1"
-
-
-[[test]]
-name = "other_test"
-path = "tests/other_test.rs"
-harness = false

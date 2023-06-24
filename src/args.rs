@@ -157,10 +157,10 @@ where
 }
 
 /// Possible values for the `--color` option.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum ColorSetting {
     /// Colorize output if stdout is a tty and tests are run on serially
-    /// (default).
+    #[default]
     Auto,
 
     /// Always colorize output.
@@ -170,26 +170,15 @@ pub enum ColorSetting {
     Never,
 }
 
-impl Default for ColorSetting {
-    fn default() -> Self {
-        ColorSetting::Auto
-    }
-}
-
 /// Possible values for the `--format` option.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum FormatSetting {
-    /// One line per test. Output for humans. (default)
+    /// One line per test. Output for humans.
+    #[default]
     Pretty,
 
     /// One character per test. Usefull for test suites with many tests.
     Terse,
-}
-
-impl Default for FormatSetting {
-    fn default() -> Self {
-        FormatSetting::Pretty
-    }
 }
 
 #[cfg(test)]

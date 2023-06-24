@@ -196,26 +196,26 @@ impl fmt::Debug for Trial {
     }
 }
 
-struct Config {}
+// struct Config {}
 
-type AnyOwnedVal = Box<dyn std::any::Any + Send + Sync + 'static>;
-type AnySharedVal = Arc<dyn std::any::Any + Send + Sync + 'static>;
+// type AnyOwnedVal = Box<dyn std::any::Any + Send + Sync + 'static>;
+// type AnySharedVal = Arc<dyn std::any::Any + Send + Sync + 'static>;
 
 struct Setup {
     type_id: fn() -> TypeId,
     module: &'static str,
-    function: &'static str,
-    file: &'static str,
-    line: u32,
-    setup: tokio::sync::Mutex<MaybeSetup>,
+    // function: &'static str,
+    // file: &'static str,
+    // line: u32,
+    // setup: tokio::sync::Mutex<MaybeSetup>,
 }
 struct SetupInit {
     type_id: fn() -> TypeId,
     module: &'static str,
-    function: &'static str,
-    file: &'static str,
-    line: u32,
-    setup: MaybeSetupInit,
+    // function: &'static str,
+    // file: &'static str,
+    // line: u32,
+    // setup: MaybeSetupInit,
 }
 
 impl Hash for Setup {
@@ -231,42 +231,42 @@ impl PartialEq for Setup {
 }
 impl Eq for Setup {}
 
-enum MaybeSetupInit {
-    /// should be called many times
-    Ephemeral(fn() -> tokio::task::JoinHandle<AnyOwnedVal>),
-    /// should be called once
-    SharedInit(fn() -> tokio::task::JoinHandle<AnySharedVal>),
-}
-enum MaybeSetup {
-    /// should be called many times
-    Ephemeral(fn() -> tokio::task::JoinHandle<AnyOwnedVal>),
-    /// should be called once
-    SharedInit(fn() -> tokio::task::JoinHandle<AnySharedVal>),
-    /// called once and waiting
-    Running(tokio::task::JoinHandle<AnySharedVal>),
-    /// done
-    Done(AnySharedVal),
-}
+// enum MaybeSetupInit {
+//     // /// should be called many times
+//     // Ephemeral(fn() -> tokio::task::JoinHandle<AnyOwnedVal>),
+//     /// should be called once
+//     SharedInit(fn() -> tokio::task::JoinHandle<AnySharedVal>),
+// }
+// enum MaybeSetup {
+//     /// should be called many times
+//     Ephemeral(fn() -> tokio::task::JoinHandle<AnyOwnedVal>),
+//     /// should be called once
+//     SharedInit(fn() -> tokio::task::JoinHandle<AnySharedVal>),
+//     /// called once and waiting
+//     Running(tokio::task::JoinHandle<AnySharedVal>),
+//     /// done
+//     Done(AnySharedVal),
+// }
 
 inventory::collect!(SetupInit);
 
-fn setup_config() -> tokio::task::JoinHandle<AnySharedVal> {
-    inventory::submit! {
-        SetupInit {
-            setup: MaybeSetupInit::SharedInit(setup_config),
-            type_id: TypeId::of::<Config>,
-            module: module_path!(),
-            function: "setup_config",
-            file: file!(),
-            line: line!()
-        }
-    }
+// fn setup_config() -> tokio::task::JoinHandle<AnySharedVal> {
+//     inventory::submit! {
+//         SetupInit {
+//             type_id: TypeId::of::<Config>,
+//             module: module_path!(),
+//             // function: "setup_config",
+//             // file: file!(),
+//             // line: line!()
+//             // setup: MaybeSetupInit::SharedInit(setup_config),
+//         }
+//     }
 
-    async fn __inner() -> Config {
-        Config {}
-    }
-    tokio::spawn(async { Arc::new(__inner().await) as Arc<_> })
-}
+//     async fn __inner() -> Config {
+//         Config {}
+//     }
+//     tokio::spawn(async { Arc::new(__inner().await) as Arc<_> })
+// }
 
 struct Context {
     values: HashSet<Arc<Setup>>,
@@ -301,13 +301,13 @@ fn setup_tests() -> (Tester, Context) {
         context.values.insert(Arc::new(Setup {
             type_id: setup.type_id,
             module: setup.module,
-            function: setup.function,
-            file: setup.file,
-            line: setup.line,
-            setup: tokio::sync::Mutex::new(match setup.setup {
-                MaybeSetupInit::Ephemeral(f) => MaybeSetup::Ephemeral(f),
-                MaybeSetupInit::SharedInit(f) => MaybeSetup::SharedInit(f),
-            }),
+            // function: setup.function,
+            // file: setup.file,
+            // line: setup.line,
+            // setup: tokio::sync::Mutex::new(match setup.setup {
+            //     MaybeSetupInit::Ephemeral(f) => MaybeSetup::Ephemeral(f),
+            //     MaybeSetupInit::SharedInit(f) => MaybeSetup::SharedInit(f),
+            // }),
         }));
     }
     let tester = Tester {
@@ -432,7 +432,17 @@ impl Arguments {
     }
 }
 
-/// Runs all given trials (tests & benchmarks).
+
+/// Runs all given tests.
+///
+/// This is the central function of this crate. It provides the framework for
+/// the testing harness. It does all the printing and house keeping.
+pub fn main() {
+    let args = Arguments::from_args();
+    run(&args).exit_if_failed();
+}
+
+/// Runs all given tests.
 ///
 /// This is the central function of this crate. It provides the framework for
 /// the testing harness. It does all the printing and house keeping.
@@ -444,7 +454,7 @@ pub fn run(args: &Arguments) -> Conclusion {
     let start_instant = Instant::now();
     let mut conclusion = Conclusion::empty();
 
-    let (tester, context) = setup_tests();
+    let (tester, _context) = setup_tests();
     let mut tests = tester.inner.lock().unwrap();
 
     // Apply filtering

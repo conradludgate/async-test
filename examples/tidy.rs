@@ -1,12 +1,11 @@
 extern crate async_test;
 
-use async_test::{Arguments, TestBuilder, Tester, Trial};
+use async_test::{TestBuilder, Tester, Trial};
 
 use std::{env, error::Error, ffi::OsStr, fs, path::Path};
 
 fn main() {
-    let args = Arguments::from_args();
-    async_test::run(&args).exit();
+    async_test::main()
 }
 
 inventory::submit! {TestBuilder(collect_tests)}
