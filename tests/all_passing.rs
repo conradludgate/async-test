@@ -1,5 +1,5 @@
+use async_test::Conclusion;
 use common::{args, check};
-use async_test::{Conclusion, Trial, Tester, TestBuilder};
 use pretty_assertions::assert_eq;
 
 use crate::common::do_run;
@@ -7,12 +7,17 @@ use crate::common::do_run;
 #[macro_use]
 mod common;
 
-inventory::submit! {TestBuilder(tests)}
-fn tests(tester: Tester) {
-    tester.add(Trial::test("foo", || async {}));
-    tester.add(Trial::test("bar", || async {}));
-    tester.add(Trial::test("barro", || async {}));
-}
+async_test::test!(
+    async fn foo() {}
+);
+
+async_test::test!(
+    async fn bar() {}
+);
+
+async_test::test!(
+    async fn barro() {}
+);
 
 #[test]
 fn normal() {
@@ -24,12 +29,11 @@ fn normal() {
             num_passed: 3,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         },
         "
-            test foo   ... ok
-            test bar   ... ok
             test barro ... ok
+            test bar   ... ok
+            test foo   ... ok
         ",
     );
 }
@@ -44,7 +48,6 @@ fn filter_one() {
             num_passed: 1,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         },
         "test foo ... ok",
     );
@@ -60,11 +63,10 @@ fn filter_two() {
             num_passed: 2,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         },
         "
-            test bar   ... ok
             test barro ... ok
+            test bar   ... ok
         ",
     );
 }
@@ -79,7 +81,6 @@ fn filter_exact() {
             num_passed: 1,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         },
         "test bar ... ok",
     );
@@ -95,7 +96,6 @@ fn filter_two_and_skip() {
             num_passed: 1,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         },
         "test bar ... ok",
     );
@@ -111,12 +111,11 @@ fn skip_nothing() {
             num_passed: 3,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         },
         "
-            test foo   ... ok
-            test bar   ... ok
             test barro ... ok
+            test bar   ... ok
+            test foo   ... ok
         ",
     );
 }
@@ -131,7 +130,6 @@ fn skip_two() {
             num_passed: 1,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         },
         "test foo ... ok",
     );
@@ -147,11 +145,10 @@ fn skip_exact() {
             num_passed: 2,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         },
         "
-            test foo   ... ok
             test barro ... ok
+            test foo   ... ok
         ",
     );
 }
@@ -166,7 +163,6 @@ fn terse_output() {
             num_passed: 3,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         }
     );
     assert_log!(
@@ -174,7 +170,7 @@ fn terse_output() {
         "
         running 3 tests
         ...
-        test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; \
+        test result: ok. 3 passed; 0 failed; 0 ignored; 0 filtered out; \
             finished in 0.00s
     "
     );

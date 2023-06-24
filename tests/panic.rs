@@ -1,14 +1,18 @@
+use async_test::Conclusion;
 use common::{args, check};
-use async_test::{Conclusion, TestBuilder, Tester, Trial};
 
 #[macro_use]
 mod common;
 
-inventory::submit! {TestBuilder(foo)}
-fn foo(tester: Tester) {
-    tester.add(Trial::test("passes", || async {}));
-    tester.add(Trial::test("panics", || async { panic!("uh oh") }));
-}
+async_test::test!(
+    async fn panics() {
+        panic!("uh oh")
+    }
+);
+
+async_test::test!(
+    async fn passes() {}
+);
 
 #[test]
 fn normal() {
@@ -20,7 +24,6 @@ fn normal() {
             num_passed: 1,
             num_failed: 1,
             num_ignored: 0,
-            num_measured: 0,
         },
         "
             test passes ... ok

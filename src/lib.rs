@@ -22,24 +22,20 @@
 //! harness = false
 //! ```
 //!
-//! And in `tests/mytest.rs` you would call [`run`] in the `main` function:
+//! And in `tests/mytest.rs` you would call [`main`] in the `main` function:
 //!
 //! ```no_run
-//! use async_test::{Arguments, Trial, Tester, TestBuilder};
-//!
-//!
-//! // Parse command line arguments
-//! let args = Arguments::from_args();
-//!
 //! // Create a list of tests (in this case: two dummy tests).
-//! inventory::submit! {TestBuilder(tests)}
-//! fn tests(tester: Tester) {
-//!     tester.add(Trial::test("succeeding_test", || async {}));
-//!     tester.add(Trial::test("failing_test", || async { panic!("Woops") }));
-//! }
+//! async_test::test!(
+//!     async fn succeeding_test() {}
+//! );
+//!
+//! async_test::test!(
+//!     async fn failing_test() { panic!("Woops") }
+//! );
 //!
 //! // Run all tests and exit the application appropriatly.
-//! async_test::run(&args).exit();
+//! async_test::main();
 //! ```
 //!
 //! Instead of returning `Ok` or `Err` directly, you want to actually perform
@@ -284,8 +280,12 @@ struct TesterInner {
     tasks: Vec<Trial>,
 }
 
-pub struct TestBuilder(pub fn(tester: Tester));
-inventory::collect!(TestBuilder);
+mod builder {
+    use crate::Tester;
+
+    pub struct TestBuilder(pub fn(tester: Tester));
+    inventory::collect!(TestBuilder);
+}
 
 // inventory::submit! {TestBuilder(foo)}
 // fn foo(mut tester: Tester) {}
@@ -310,7 +310,7 @@ fn setup_tests() -> (Tester, Context) {
     let tester = Tester {
         inner: Arc::new(Mutex::new(TesterInner { tasks: vec![] })),
     };
-    for builder in inventory::iter::<TestBuilder>() {
+    for builder in inventory::iter::<builder::TestBuilder>() {
         (builder.0)(tester.clone())
     }
     (tester, context)
@@ -357,9 +357,6 @@ pub struct Conclusion {
 
     /// Number of ignored tests and benchmarks.
     pub num_ignored: u64,
-
-    /// Number of benchmarks that successfully ran.
-    pub num_measured: u64,
 }
 
 impl Conclusion {
@@ -389,7 +386,6 @@ impl Conclusion {
             num_passed: 0,
             num_failed: 0,
             num_ignored: 0,
-            num_measured: 0,
         }
     }
 }
@@ -548,6 +544,8 @@ pub fn run(args: &Arguments) -> Conclusion {
         handle_outcome(outcome, test_info, &mut printer);
     }
 
+    let _ = std::panic::take_hook();
+
     // Print failures if there were any, and the final summary.
     if !failed_tests.is_empty() {
         printer.print_failures(&failed_tests);
@@ -611,8 +609,8 @@ macro_rules! test {
 
 #[macro_export]
 macro_rules! tests {
-    ($vis:vis fn $name:ident($tester:ident: $tester_ty:ty) $body:block) => {
-        $vis fn $name($tester: $tester_ty) {
+    ($(#[$meta:meta])* $vis:vis fn $name:ident($tester:ident: $tester_ty:ty) $body:block) => {
+        $(#[$meta])* $vis fn $name($tester: $tester_ty) {
             {
                 $crate::__sus::inventory::submit! { $crate::__sus::TestBuilder($name) }
             }
@@ -625,6 +623,6 @@ macro_rules! tests {
 
 #[doc(hidden)]
 pub mod __sus {
-    pub use crate::TestBuilder;
+    pub use crate::builder::TestBuilder;
     pub use inventory;
 }

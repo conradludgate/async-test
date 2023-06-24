@@ -158,12 +158,11 @@ impl Printer {
                 self.print_outcome_pretty(&outcome);
                 writeln!(
                     self.out,
-                    ". {} passed; {} failed; {} ignored; {} measured; \
+                    ". {} passed; {} failed; {} ignored; \
                         {} filtered out; finished in {:.2}s",
                     conclusion.num_passed,
                     conclusion.num_failed,
                     conclusion.num_ignored,
-                    conclusion.num_measured,
                     conclusion.num_filtered_out,
                     execution_time.as_secs_f64()
                 )
