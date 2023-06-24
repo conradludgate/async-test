@@ -7,7 +7,7 @@ use bytes::Bytes;
 
 use crate::TestInfo;
 
-use self::reporter::StatusLevel;
+use self::reporter::{FinalStatusLevel, StatusLevel};
 
 pub mod reporter;
 
@@ -95,6 +95,24 @@ pub enum ExecutionDescription<'a> {
 
     /// The test was run once, or possibly multiple times. All runs failed.
     Failure { status: &'a ExecuteStatus },
+}
+
+impl<'a> ExecutionDescription<'a> {
+    /// Returns the final status level for this `ExecutionDescription`.
+    pub fn final_status_level(&self) -> FinalStatusLevel {
+        match self {
+            ExecutionDescription::Success { status, .. } => {
+                // Slow is higher priority than leaky, so return slow first here.
+                if status.is_slow {
+                    FinalStatusLevel::Slow
+                } else {
+                    FinalStatusLevel::Pass
+                }
+            }
+            // A flaky test implies that we print out retry information for it.
+            ExecutionDescription::Failure { .. } => FinalStatusLevel::Fail,
+        }
+    }
 }
 
 /// Represents a single test with its associated binary.

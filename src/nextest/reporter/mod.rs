@@ -207,7 +207,11 @@ impl TestReporterBuilder {
 
 impl TestReporterBuilder {
     /// Creates a new test reporter.
-    pub(crate) fn build<'a>(&self, test_list: &TestList, output: ReporterStderr<'a>) -> TestReporter<'a> {
+    pub(crate) fn build<'a>(
+        &self,
+        test_list: &TestList,
+        output: ReporterStderr<'a>,
+    ) -> TestReporter<'a> {
         let styles = Box::default();
         // let binary_id_width = test_list
         //     .iter()
@@ -224,9 +228,7 @@ impl TestReporterBuilder {
             true => status_level.max(StatusLevel::Pass),
             false => status_level,
         };
-        // let final_status_level = self
-        //     .final_status_level
-        //     .unwrap_or(FinalStatusLevel::All);
+        let final_status_level = self.final_status_level.unwrap_or(FinalStatusLevel::Slow);
         // .unwrap_or_else(|| profile.final_status_level());
 
         // failure_output and success_output are meaningless if the runner isn't capturing any
@@ -297,14 +299,14 @@ impl TestReporterBuilder {
         TestReporter {
             inner: TestReporterImpl {
                 status_level,
-                // final_status_level,
+                final_status_level,
                 force_success_output,
                 force_failure_output,
                 no_capture: self.no_capture,
                 // binary_id_width,
                 styles,
                 cancel_status: None,
-                // final_outputs: DebugIgnore(vec![]),
+                final_outputs: DebugIgnore(vec![]),
             },
             stderr,
             metadata_reporter: aggregator,
@@ -493,23 +495,23 @@ fn write_summary_str(run_stats: &RunStats, styles: &Styles, out: &mut String) ->
     Ok(())
 }
 
-// #[derive(Debug)]
-// enum FinalOutput {
-//     Skipped,
-//     Executed {
-//         run_status: ExecuteStatus,
-//         test_output_display: TestOutputDisplay,
-//     },
-// }
+#[derive(Debug)]
+enum FinalOutput {
+    Skipped,
+    Executed {
+        run_status: ExecuteStatus,
+        test_output_display: TestOutputDisplay,
+    },
+}
 
-// impl FinalOutput {
-//     fn final_status_level(&self) -> FinalStatusLevel {
-//         match self {
-//             Self::Skipped(_) => FinalStatusLevel::Skip,
-//             Self::Executed { run_status, .. } => run_status.describe().final_status_level(),
-//         }
-//     }
-// }
+impl FinalOutput {
+    fn final_status_level(&self) -> FinalStatusLevel {
+        match self {
+            Self::Skipped => FinalStatusLevel::Skip,
+            Self::Executed { run_status, .. } => run_status.describe().final_status_level(),
+        }
+    }
+}
 
 struct TestReporterImpl {
     status_level: StatusLevel,
@@ -517,9 +519,10 @@ struct TestReporterImpl {
     force_failure_output: Option<TestOutputDisplay>,
     no_capture: bool,
     // binary_id_width: usize,
+    final_status_level: FinalStatusLevel,
     styles: Box<Styles>,
     cancel_status: Option<CancelReason>,
-    // final_outputs: DebugIgnore<Vec<(TestInstance, FinalOutput)>>,
+    final_outputs: DebugIgnore<Vec<(TestInstance, FinalOutput)>>,
 }
 
 impl<'a> TestReporterImpl {
@@ -610,19 +613,19 @@ impl<'a> TestReporterImpl {
                     }
                 }
 
-                // // Store the output in final_outputs if test output display is requested, or if
-                // // we have to print a one-line summary at the end.
-                // if test_output_display.is_final()
-                //     || self.final_status_level >= describe.final_status_level()
-                // {
-                //     self.final_outputs.push((
-                //         test_instance.clone(),
-                //         FinalOutput::Executed {
-                //             run_statuses: run_statuses.clone(),
-                //             test_output_display,
-                //         },
-                //     ));
-                // }
+                // Store the output in final_outputs if test output display is requested, or if
+                // we have to print a one-line summary at the end.
+                if test_output_display.is_final()
+                    || self.final_status_level >= describe.final_status_level()
+                {
+                    self.final_outputs.push((
+                        test_instance.clone(),
+                        FinalOutput::Executed {
+                            run_status: run_status.clone(),
+                            test_output_display,
+                        },
+                    ));
+                }
             }
             TestEvent::TestSkipped {
                 test_instance,
@@ -722,50 +725,50 @@ impl<'a> TestReporterImpl {
 
                 // // Don't print out final outputs if canceled due to Ctrl-C.
                 // if self.cancel_status < Some(CancelReason::Signal) {
-                //     // Sort the final outputs for a friendlier experience.
-                //     self.final_outputs
-                //         .sort_by_key(|(test_instance, final_output)| {
-                //             // Use the final status level, reversed (i.e. failing tests are printed at the very end).
-                //             (
-                //                 Reverse(final_output.final_status_level()),
-                //                 test_instance.sort_key(),
-                //             )
-                //         });
+                // Sort the final outputs for a friendlier experience.
+                self.final_outputs
+                    .sort_by_key(|(test_instance, final_output)| {
+                        // Use the final status level, reversed (i.e. failing tests are printed at the very end).
+                        (
+                            Reverse(final_output.final_status_level()),
+                            test_instance.name.clone(),
+                        )
+                    });
 
-                //     for (test_instance, final_output) in &*self.final_outputs {
-                //         let final_status_level = final_output.final_status_level();
-                //         match final_output {
-                //             FinalOutput::Skipped(_) => {
-                //                 self.write_skip_line(test_instance.clone(), writer)?;
-                //             }
-                //             FinalOutput::Executed {
-                //                 run_statuses,
-                //                 test_output_display,
-                //             } => {
-                //                 let last_status = run_statuses.last_status();
+                for (test_instance, final_output) in &*self.final_outputs {
+                    let final_status_level = final_output.final_status_level();
+                    match final_output {
+                        FinalOutput::Skipped => {
+                            self.write_skip_line(test_instance.clone(), writer)?;
+                        }
+                        FinalOutput::Executed {
+                            run_status,
+                            test_output_display,
+                        } => {
+                            let last_status = run_status.result;
 
-                //                 // Print out the final status line so that status lines are shown
-                //                 // for tests that e.g. failed due to signals.
-                //                 if self.final_status_level >= final_status_level
-                //                     || test_output_display.is_final()
-                //                 {
-                //                     self.write_final_status_line(
-                //                         test_instance.clone(),
-                //                         run_statuses.describe(),
-                //                         writer,
-                //                     )?;
-                //                 }
-                //                 if test_output_display.is_final() {
-                //                     self.write_stdout_stderr(
-                //                         test_instance,
-                //                         last_status,
-                //                         false,
-                //                         writer,
-                //                     )?;
-                //                 }
-                //             }
-                //         }
-                //     }
+                            // Print out the final status line so that status lines are shown
+                            // for tests that e.g. failed due to signals.
+                            if self.final_status_level >= final_status_level
+                                || test_output_display.is_final()
+                            {
+                                self.write_final_status_line(
+                                    test_instance.clone(),
+                                    run_status.describe(),
+                                    writer,
+                                )?;
+                            }
+                            if test_output_display.is_final() {
+                                self.write_stdout_stderr(
+                                    test_instance,
+                                    run_status,
+                                    false,
+                                    writer,
+                                )?;
+                            }
+                        }
+                    }
+                }
                 // }
             }
         }
@@ -864,11 +867,7 @@ impl<'a> TestReporterImpl {
         Ok(())
     }
 
-    fn write_instance(
-        &self,
-        instance: TestInstance,
-        writer: &mut impl Write,
-    ) -> io::Result<()> {
+    fn write_instance(&self, instance: TestInstance, writer: &mut impl Write) -> io::Result<()> {
         write!(writer, "{:>width$} ", "test_suite", width = 4)?;
 
         write_test_name(&instance.name, &self.styles.list_styles, writer)
