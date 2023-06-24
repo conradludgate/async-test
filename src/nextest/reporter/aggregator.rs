@@ -15,11 +15,11 @@
 // use camino::Utf8PathBuf;
 use chrono::{DateTime, FixedOffset, Utc};
 use debug_ignore::DebugIgnore;
-use quick_junit::{NonSuccessKind, Output, Report, TestCase, TestCaseStatus, TestSuite};
+use quick_junit::{NonSuccessKind, Report, TestCase, TestCaseStatus, TestSuite};
 use std::{borrow::Cow, collections::HashMap, fs::File, path::PathBuf, time::SystemTime};
 use thiserror::Error;
 
-use crate::nextest::{ExecuteStatus, ExecutionDescription, ExecutionResult};
+use crate::nextest::{ExecuteStatus, ExecutionResult};
 
 use super::TestEvent;
 
@@ -141,7 +141,7 @@ impl<'cfg> MetadataJunit<'cfg> {
 
                 let status = run_status.result;
 
-                let mut testcase_status = match run_status.result {
+                let testcase_status = match run_status.result {
                     ExecutionResult::Pass => TestCaseStatus::success(),
                     ExecutionResult::Fail => {
                         let mut testcase_status =

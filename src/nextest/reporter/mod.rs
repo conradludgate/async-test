@@ -578,7 +578,7 @@ impl<'a> TestReporterImpl {
                 if !*will_terminate && self.status_level >= StatusLevel::Slow {
                     write!(writer, "{:>12} ", "SLOW".style(self.styles.skip))?;
                 } else if *will_terminate {
-                    let (required_status_level, style) = (StatusLevel::Fail, self.styles.fail);
+                    let (_required_status_level, style) = (StatusLevel::Fail, self.styles.fail);
                     write!(writer, "{:>12} ", "TERMINATING".style(style))?;
                 }
 
@@ -609,7 +609,7 @@ impl<'a> TestReporterImpl {
                     if self.cancel_status < Some(CancelReason::Signal)
                         && test_output_display.is_immediate()
                     {
-                        self.write_stdout_stderr(test_instance, &run_status, false, writer)?;
+                        self.write_stdout_stderr(test_instance, run_status, false, writer)?;
                     }
                 }
 
@@ -745,7 +745,7 @@ impl<'a> TestReporterImpl {
                             run_status,
                             test_output_display,
                         } => {
-                            let last_status = run_status.result;
+                            let _last_status = run_status.result;
 
                             // Print out the final status line so that status lines are shown
                             // for tests that e.g. failed due to signals.

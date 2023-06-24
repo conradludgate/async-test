@@ -78,7 +78,7 @@ use std::{
     process,
     sync::{Arc, Mutex, OnceLock},
     task::Poll,
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 
 mod args;
@@ -620,7 +620,7 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         })
         .unwrap();
 
-    let mut conclusion = Conclusion::empty();
+    let conclusion = Conclusion::empty();
 
     let mut stats = RunStats {
         initial_run_count: tests.tasks.len(),
