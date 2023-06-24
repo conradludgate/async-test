@@ -1,7 +1,7 @@
 use std::{path::Path, iter::repeat_with, collections::HashMap};
 use pretty_assertions::assert_eq;
 
-use libtest_mimic::{run, Arguments, Conclusion, Trial};
+use libtest_mimic::{run, Arguments, Conclusion};
 
 
 const TEMPDIR: &str = env!("CARGO_TARGET_TMPDIR");
@@ -12,14 +12,14 @@ pub fn args<const N: usize>(args: [&str; N]) -> Arguments {
     Arguments::from_iter(v)
 }
 
-pub fn do_run(mut args: Arguments, tests: Vec<Trial>) -> (Conclusion, String) {
+pub fn do_run(mut args: Arguments) -> (Conclusion, String) {
     // Create path to temporary file.
     let suffix = repeat_with(fastrand::alphanumeric).take(10).collect::<String>();
     let path = Path::new(&TEMPDIR).join(format!("libtest_mimic_output_{suffix}.txt"));
 
     args.logfile = Some(path.display().to_string());
 
-    let c = run(&args, tests);
+    let c = run(&args);
     let output = std::fs::read_to_string(&path)
         .expect("Can't read temporary logfile");
     std::fs::remove_file(&path)
@@ -86,7 +86,7 @@ pub fn assert_reordered_log(actual: &str, num: u64, expected_lines: &[&str], tai
 macro_rules! assert_log {
     ($actual:expr, $expected:expr) => {
         let mut actual = $actual.trim().to_owned();
-        let expected = crate::common::clean_expected_log($expected);
+        let expected = common::clean_expected_log($expected);
         let expected = expected.trim();
 
         if expected.ends_with("finished in 0.00s") {
@@ -103,14 +103,13 @@ macro_rules! assert_log {
 
 pub fn check(
     mut args: Arguments,
-    mut tests: impl FnMut() -> Vec<Trial>,
     num_running_tests: u64,
     expected_conclusion: Conclusion,
     expected_output: &str,
 ) {
     // Run in single threaded mode
     args.test_threads = Some(1);
-    let (c, out) = do_run(args.clone(), tests());
+    let (c, out) = do_run(args.clone());
     let expected = crate::common::clean_expected_log(expected_output);
     let actual = {
         let lines = out.trim().lines().skip(1).collect::<Vec<_>>();
@@ -120,7 +119,7 @@ pub fn check(
     assert_eq!(c, expected_conclusion);
 
     // Run in multithreaded mode.
-    let (c, out) = do_run(args, tests());
+    let (c, out) = do_run(args);
     assert_reordered_log(
         &out,
         num_running_tests,

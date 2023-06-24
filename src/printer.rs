@@ -10,10 +10,7 @@ use std::{fs::File, time::Duration};
 
 use termcolor::{Ansi, Color, ColorChoice, ColorSpec, NoColor, StandardStream, WriteColor};
 
-use crate::{
-    Arguments, ColorSetting, Conclusion, FormatSetting, Outcome, Trial, Failed,
-    Measurement, TestInfo,
-};
+use crate::{Arguments, ColorSetting, Conclusion, FormatSetting, Outcome, TestInfo, Trial};
 
 pub(crate) struct Printer {
     out: Box<dyn WriteColor>,
@@ -58,12 +55,14 @@ impl Printer {
         // test names and outcomes. Counting the number of code points is just
         // a cheap way that works in most cases. Usually, these names are
         // ASCII.
-        let name_width = tests.iter()
+        let name_width = tests
+            .iter()
             .map(|test| test.info.name.chars().count())
             .max()
             .unwrap_or(0);
 
-        let kind_width = tests.iter()
+        let kind_width = tests
+            .iter()
             .map(|test| {
                 if test.info.kind.is_empty() {
                     0
@@ -102,7 +101,7 @@ impl Printer {
         match self.format {
             FormatSetting::Pretty => {
                 let kind = if kind.is_empty() {
-                    format!("")
+                    String::new()
                 } else {
                     format!("[{}] ", kind)
                 };
@@ -110,11 +109,9 @@ impl Printer {
                 write!(
                     self.out,
                     "test {: <2$}{: <3$} ... ",
-                    kind,
-                    name,
-                    self.kind_width,
-                    self.name_width,
-                ).unwrap();
+                    kind, name, self.kind_width, self.name_width,
+                )
+                .unwrap();
                 self.out.flush().unwrap();
             }
             FormatSetting::Terse => {
@@ -137,13 +134,6 @@ impl Printer {
                     Outcome::Passed => '.',
                     Outcome::Failed { .. } => 'F',
                     Outcome::Ignored => 'i',
-                    Outcome::Measured { .. } => {
-                        // Benchmark are never printed in terse mode... for
-                        // some reason.
-                        self.print_outcome_pretty(outcome);
-                        writeln!(self.out).unwrap();
-                        return;
-                    }
                 };
 
                 self.out.set_color(&color_of_outcome(outcome)).unwrap();
@@ -158,7 +148,7 @@ impl Printer {
         match self.format {
             FormatSetting::Pretty | FormatSetting::Terse => {
                 let outcome = if conclusion.has_failed() {
-                    Outcome::Failed(Failed { msg: None })
+                    Outcome::Failed(String::new())
                 } else {
                     Outcome::Passed
                 };
@@ -176,7 +166,8 @@ impl Printer {
                     conclusion.num_measured,
                     conclusion.num_filtered_out,
                     execution_time.as_secs_f64()
-                ).unwrap();
+                )
+                .unwrap();
                 writeln!(self.out).unwrap();
             }
         }
@@ -201,18 +192,12 @@ impl Printer {
             }
 
             let kind = if test.info.kind.is_empty() {
-                format!("")
+                String::new()
             } else {
                 format!("[{}] ", test.info.kind)
             };
 
-            writeln!(
-                out,
-                "{}{}: {}",
-                kind,
-                test.info.name,
-                if test.info.is_bench { "bench" } else { "test" },
-            )?;
+            writeln!(out, "{}{}: test", kind, test.info.name,)?;
         }
 
         Ok(())
@@ -220,7 +205,7 @@ impl Printer {
 
     /// Prints a list of failed tests with their messages. This is only called
     /// if there were any failures.
-    pub(crate) fn print_failures(&mut self, fails: &[(TestInfo, Option<String>)]) {
+    pub(crate) fn print_failures(&mut self, fails: &[(TestInfo, String)]) {
         writeln!(self.out).unwrap();
         writeln!(self.out, "failures:").unwrap();
         writeln!(self.out).unwrap();
@@ -228,9 +213,7 @@ impl Printer {
         // Print messages of all tests
         for (test_info, msg) in fails {
             writeln!(self.out, "---- {} ----", test_info.name).unwrap();
-            if let Some(msg) = msg {
-                writeln!(self.out, "{}", msg).unwrap();
-            }
+            writeln!(self.out, "{}", msg).unwrap();
             writeln!(self.out).unwrap();
         }
 
@@ -248,34 +231,12 @@ impl Printer {
             Outcome::Passed => "ok",
             Outcome::Failed { .. } => "FAILED",
             Outcome::Ignored => "ignored",
-            Outcome::Measured { .. } => "bench",
         };
 
         self.out.set_color(&color_of_outcome(outcome)).unwrap();
         write!(self.out, "{}", s).unwrap();
         self.out.reset().unwrap();
-
-        if let Outcome::Measured(Measurement { avg, variance }) = outcome {
-            write!(
-                self.out,
-                ": {:>11} ns/iter (+/- {})",
-                fmt_with_thousand_sep(*avg),
-                fmt_with_thousand_sep(*variance),
-            ).unwrap();
-        }
     }
-}
-
-/// Formats the given integer with `,` as thousand separator.
-pub fn fmt_with_thousand_sep(mut v: u64) -> String {
-    let mut out = String::new();
-    while v >= 1000 {
-        out = format!(",{:03}{}", v % 1000, out);
-        v /= 1000;
-    }
-    out = format!("{}{}", v, out);
-
-    out
 }
 
 /// Returns the `ColorSpec` associated with the given outcome.
@@ -285,7 +246,6 @@ fn color_of_outcome(outcome: &Outcome) -> ColorSpec {
         Outcome::Passed => Color::Green,
         Outcome::Failed { .. } => Color::Red,
         Outcome::Ignored => Color::Yellow,
-        Outcome::Measured { .. } => Color::Cyan,
     };
     out.set_fg(Some(color));
     out

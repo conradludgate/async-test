@@ -1,26 +1,19 @@
 extern crate libtest_mimic;
 
-use libtest_mimic::{Arguments, Trial, Failed};
+use libtest_mimic::{Arguments, TestBuilder, Tester, Trial};
 
-use std::{
-    env,
-    error::Error,
-    ffi::OsStr,
-    fs,
-    path::Path,
-};
+use std::{env, error::Error, ffi::OsStr, fs, path::Path};
 
-
-fn main() -> Result<(), Box<dyn Error>> {
+fn main() {
     let args = Arguments::from_args();
-    let tests = collect_tests()?;
-    libtest_mimic::run(&args, tests).exit();
+    libtest_mimic::run(&args).exit();
 }
 
+inventory::submit! {TestBuilder(collect_tests)}
 /// Creates one test for each `.rs` file in the current directory or
 /// sub-directories of the current directory.
-fn collect_tests() -> Result<Vec<Trial>, Box<dyn Error>> {
-    fn visit_dir(path: &Path, tests: &mut Vec<Trial>) -> Result<(), Box<dyn Error>> {
+fn collect_tests(tester: Tester) {
+    fn visit_dir(path: &Path, tester: &Tester) -> Result<(), Box<dyn Error>> {
         for entry in fs::read_dir(path)? {
             let entry = entry?;
             let file_type = entry.file_type()?;
@@ -34,13 +27,13 @@ fn collect_tests() -> Result<Vec<Trial>, Box<dyn Error>> {
                         .display()
                         .to_string();
 
-                    let test = Trial::test(name, move || check_file(&path))
+                    let test = Trial::test(name, move || async move { check_file(&path).await })
                         .with_kind("tidy");
-                    tests.push(test);
+                    tester.add(test);
                 }
             } else if file_type.is_dir() {
                 // Handle directories
-                visit_dir(&path, tests)?;
+                visit_dir(&path, tester)?;
             }
         }
 
@@ -49,35 +42,29 @@ fn collect_tests() -> Result<Vec<Trial>, Box<dyn Error>> {
 
     // We recursively look for `.rs` files, starting from the current
     // directory.
-    let mut tests = Vec::new();
-    let current_dir = env::current_dir()?;
-    visit_dir(&current_dir, &mut tests)?;
-
-    Ok(tests)
+    let current_dir = env::current_dir().unwrap();
+    visit_dir(&current_dir, &tester).unwrap();
 }
 
 /// Performs a couple of tidy tests.
-fn check_file(path: &Path) -> Result<(), Failed> {
-    let content = fs::read(path).map_err(|e| format!("Cannot read file: {e}"))?;
+async fn check_file(path: &Path) {
+    let content = tokio::fs::read(path).await.unwrap();
 
     // Check that the file is valid UTF-8
-    let content = String::from_utf8(content)
-        .map_err(|_| "The file's contents are not a valid UTF-8 string!")?;
+    let content = String::from_utf8(content).unwrap();
 
     // Check for `\r`: we only want `\n` line breaks!
     if content.contains('\r') {
-        return Err("Contains '\\r' chars. Please use ' \\n' line breaks only!".into());
+        panic!("Contains '\\r' chars. Please use ' \\n' line breaks only!");
     }
 
     // Check for tab characters `\t`
     if content.contains('\t') {
-        return Err("Contains tab characters ('\\t'). Indent with four spaces!".into());
+        panic!("Contains tab characters ('\\t'). Indent with four spaces!");
     }
 
     // Check for too long lines
     if content.lines().any(|line| line.chars().count() > 100) {
-        return Err("Contains lines longer than 100 codepoints!".into());
+        panic!("Contains lines longer than 100 codepoints!");
     }
-
-    Ok(())
 }

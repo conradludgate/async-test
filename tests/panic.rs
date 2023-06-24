@@ -1,20 +1,20 @@
 use common::{args, check};
-use libtest_mimic::{Trial, Conclusion};
+use libtest_mimic::{Conclusion, TestBuilder, Tester, Trial};
 
 #[macro_use]
 mod common;
 
-
-fn tests() -> Vec<Trial> {
-    vec![
-        Trial::test("passes", || Ok(())),
-        Trial::test("panics", || panic!("uh oh")),
-    ]
+inventory::submit! {TestBuilder(foo)}
+fn foo(tester: Tester) {
+    tester.add(Trial::test("passes", || async {}));
+    tester.add(Trial::test("panics", || async { panic!("uh oh") }));
 }
 
 #[test]
 fn normal() {
-    check(args([]), tests, 2,
+    check(
+        args([]),
+        2,
         Conclusion {
             num_filtered_out: 0,
             num_passed: 1,
@@ -34,6 +34,6 @@ fn normal() {
 
             failures:
                 panics
-        "
+        ",
     );
 }

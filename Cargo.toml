@@ -20,8 +20,9 @@ exclude = [".github"]
 
 [dependencies]
 clap = { version = "4.0.8", features = ["derive"] }
-threadpool = "1.8.1"
 termcolor = "1.0.5"
+tokio = { version = "1.28", features = ["full"] }
+inventory = "0.3.6"
 
 [dev-dependencies]
 fastrand = "1.8.0"

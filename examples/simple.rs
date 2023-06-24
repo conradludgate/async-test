@@ -1,39 +1,30 @@
 extern crate libtest_mimic;
 
-use std::{thread, time};
-use libtest_mimic::{Arguments, Trial, Failed};
+use libtest_mimic::{Arguments, TestBuilder, Tester, Trial};
+use std::time;
 
+inventory::submit! {TestBuilder(tests)}
+fn tests(tester: Tester) {
+    tester.add(Trial::test("check_toph", check_toph));
+    tester.add(Trial::test("check_sokka", check_sokka));
+    tester.add(Trial::test("long_computation", long_computation).with_ignored_flag(true));
+    tester.add(Trial::test("foo", compile_fail_dummy).with_kind("compile-fail"));
+    tester.add(Trial::test("check_katara", check_katara));
+}
 
 fn main() {
     let args = Arguments::from_args();
-
-    let tests = vec![
-        Trial::test("check_toph", check_toph),
-        Trial::test("check_sokka", check_sokka),
-        Trial::test("long_computation", long_computation).with_ignored_flag(true),
-        Trial::test("foo", compile_fail_dummy).with_kind("compile-fail"),
-        Trial::test("check_katara", check_katara),
-    ];
-
-    libtest_mimic::run(&args, tests).exit();
+    libtest_mimic::run(&args).exit();
 }
-
 
 // Tests
 
-fn check_toph() -> Result<(), Failed> {
-    Ok(())
+async fn check_toph() {}
+async fn check_katara() {}
+async fn check_sokka() {
+    panic!("Sokka tripped and fell :(")
 }
-fn check_katara() -> Result<(), Failed> {
-    Ok(())
+async fn long_computation() {
+    tokio::time::sleep(time::Duration::from_secs(1)).await;
 }
-fn check_sokka() -> Result<(), Failed> {
-    Err("Sokka tripped and fell :(".into())
-}
-fn long_computation() -> Result<(), Failed> {
-    thread::sleep(time::Duration::from_secs(1));
-    Ok(())
-}
-fn compile_fail_dummy() -> Result<(), Failed> {
-    Ok(())
-}
+async fn compile_fail_dummy() {}
