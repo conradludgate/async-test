@@ -1,12 +1,12 @@
-extern crate libtest_mimic;
+extern crate async_test;
 
-use libtest_mimic::{Arguments, TestBuilder, Tester, Trial};
+use async_test::{Arguments, TestBuilder, Tester, Trial};
 
 use std::{env, error::Error, ffi::OsStr, fs, path::Path};
 
 fn main() {
     let args = Arguments::from_args();
-    libtest_mimic::run(&args).exit();
+    async_test::run(&args).exit();
 }
 
 inventory::submit! {TestBuilder(collect_tests)}

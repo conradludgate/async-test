@@ -1,5 +1,5 @@
 use common::{args, check};
-use libtest_mimic::{Conclusion, Trial, Tester, TestBuilder};
+use async_test::{Conclusion, Trial, Tester, TestBuilder};
 use pretty_assertions::assert_eq;
 
 use crate::common::do_run;

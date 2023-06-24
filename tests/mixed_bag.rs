@@ -1,5 +1,5 @@
 use crate::common::{args, check};
-use libtest_mimic::{Conclusion, TestBuilder, Tester, Trial};
+use async_test::{Conclusion, TestBuilder, Tester, Trial};
 use pretty_assertions::assert_eq;
 
 #[macro_use]
@@ -53,10 +53,10 @@ fn normal() {
             failures:
 
             ---- dog ----
-            test panicked: was not a good boy
+            was not a good boy
 
             ---- bunny ----
-            test panicked: jumped too high
+            jumped too high
 
 
             failures:
@@ -91,10 +91,10 @@ fn test_mode() {
             failures:
 
             ---- dog ----
-            test panicked: was not a good boy
+            was not a good boy
 
             ---- bunny ----
-            test panicked: jumped too high
+            jumped too high
 
 
             failures:
@@ -217,7 +217,7 @@ fn filter_o_test() {
             failures:
 
             ---- dog ----
-            test panicked: was not a good boy
+            was not a good boy
 
 
             failures:
@@ -247,10 +247,10 @@ fn filter_o_test_include_ignored() {
             failures:
 
             ---- dog ----
-            test panicked: was not a good boy
+            was not a good boy
 
             ---- owl ----
-            test panicked: broke neck
+            broke neck
 
 
             failures:
@@ -279,7 +279,7 @@ fn filter_o_test_ignored() {
             failures:
 
             ---- owl ----
-            test panicked: broke neck
+            broke neck
 
 
             failures:
@@ -313,16 +313,16 @@ fn normal_include_ignored() {
             failures:
 
             ---- dog ----
-            test panicked: was not a good boy
+            was not a good boy
 
             ---- bunny ----
-            test panicked: jumped too high
+            jumped too high
 
             ---- owl ----
-            test panicked: broke neck
+            broke neck
 
             ---- bear ----
-            test panicked: no honey
+            no honey
 
 
             failures:
@@ -355,10 +355,10 @@ fn normal_ignored() {
             failures:
 
             ---- owl ----
-            test panicked: broke neck
+            broke neck
 
             ---- bear ----
-            test panicked: no honey
+            no honey
 
 
             failures:
@@ -387,7 +387,7 @@ fn lots_of_flags() {
             failures:
 
             ---- owl ----
-            test panicked: broke neck
+            broke neck
 
 
             failures:
@@ -417,10 +417,10 @@ fn lots_of_flags() {
 //         failures:
 
 //         ---- dog ----
-//         test panicked: was not a good boy
+//         was not a good boy
 
 //         ---- bunny ----
-//         test panicked: jumped too high
+//         jumped too high
 
 //         failures:
 //             dog

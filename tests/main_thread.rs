@@ -1,4 +1,4 @@
-use libtest_mimic::{Arguments, TestBuilder, Tester, Trial};
+use async_test::{Arguments, TestBuilder, Tester, Trial};
 
 inventory::submit! {TestBuilder(tests)}
 fn tests(tester: Tester) {
@@ -16,7 +16,7 @@ fn check_test_on_main_thread() {
         ..Arguments::default()
     };
 
-    let conclusion = libtest_mimic::run(&args);
+    let conclusion = async_test::run(&args);
 
     assert_eq!(conclusion.num_passed, 1);
 }

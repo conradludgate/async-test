@@ -1,5 +1,5 @@
 use common::{args, check};
-use libtest_mimic::{Conclusion, TestBuilder, Tester, Trial};
+use async_test::{Conclusion, TestBuilder, Tester, Trial};
 
 #[macro_use]
 mod common;
@@ -29,7 +29,7 @@ fn normal() {
             failures:
 
             ---- panics ----
-            test panicked: uh oh
+            uh oh
 
 
             failures:

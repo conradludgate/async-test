@@ -25,7 +25,7 @@
 //! And in `tests/mytest.rs` you would call [`run`] in the `main` function:
 //!
 //! ```no_run
-//! use libtest_mimic::{Arguments, Trial, Tester, TestBuilder};
+//! use async_test::{Arguments, Trial, Tester, TestBuilder};
 //!
 //!
 //! // Parse command line arguments
@@ -39,7 +39,7 @@
 //! }
 //!
 //! // Run all tests and exit the application appropriatly.
-//! libtest_mimic::run(&args).exit();
+//! async_test::run(&args).exit();
 //! ```
 //!
 //! Instead of returning `Ok` or `Err` directly, you want to actually perform
@@ -506,9 +506,7 @@ pub fn run(args: &Arguments) -> Conclusion {
         None => threads,
     };
 
-    std::panic::set_hook(Box::new(|_info| {
-
-    }));
+    std::panic::set_hook(Box::new(|_info| {}));
 
     for test in tests.tasks.drain(..) {
         if set.len() >= tasks.get() {
@@ -567,11 +565,8 @@ async fn run_single(
                     .map(|s| s.as_str())
                     .or(e.downcast_ref::<&str>().copied());
 
-                let msg = match payload {
-                    Some(payload) => format!("test panicked: {payload}"),
-                    None => "test panicked".to_string(),
-                };
-                Poll::Ready(Outcome::Failed(msg))
+                let msg = payload.unwrap_or("test panicked");
+                Poll::Ready(Outcome::Failed(msg.to_owned()))
             },
             |res| match res {
                 Poll::Ready(()) => Poll::Ready(Outcome::Passed),
@@ -580,8 +575,6 @@ async fn run_single(
         )
     })
     .await;
-
-
 
     (res, info)
 }

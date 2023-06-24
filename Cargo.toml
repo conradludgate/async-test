@@ -1,16 +1,15 @@
 [package]
-name = "libtest-mimic"
-version = "0.6.1"
-authors = ["Lukas Kalbertodt <lukas.kalbertodt@gmail.com>"]
+name = "async-test"
+version = "0.1.0"
+authors = ["Conrad Ludgate <conradludgate@gmail.com>"]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.70"
 
 description = """
-Write your own test harness that looks and behaves like the built-in test \
-harness used by `rustc --test`
+An async test harness, with support for dynamic test builders and test setups
 """
-documentation = "https://docs.rs/libtest-mimic"
-repository = "https://github.com/LukasKalbertodt/libtest-mimic"
+documentation = "https://docs.rs/async-test"
+repository = "https://github.com/conradludgate/async-test"
 license = "MIT/Apache-2.0"
 keywords = ["libtest", "test", "built-in", "framework", "harness"]
 categories = ["development-tools::testing", "development-tools::build-utils"]
@@ -27,3 +26,9 @@ inventory = "0.3.6"
 [dev-dependencies]
 fastrand = "1.8.0"
 pretty_assertions = "1.2.1"
+
+
+[[test]]
+name = "other_test"
+path = "tests/other_test.rs"
+harness = false
