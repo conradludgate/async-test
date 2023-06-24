@@ -671,7 +671,7 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
             .report_event(TestEvent::TestFinished {
                 test_instance: TestInstance { name: test.name },
                 success_output: nextest::reporter::TestOutputDisplay::Never,
-                failure_output: nextest::reporter::TestOutputDisplay::Final,
+                failure_output: nextest::reporter::TestOutputDisplay::Immediate,
                 junit_store_success_output: false,
                 junit_store_failure_output: false,
                 run_status: status,
