@@ -41,7 +41,7 @@ async fn long_computation() {
     tokio::time::sleep(time::Duration::from_secs(1)).await;
 }
 async fn short_computation() {
-    tokio::time::sleep(time::Duration::from_millis(50)).await;
+    tokio::time::sleep(time::Duration::from_millis(200)).await;
 }
 
 async fn compile_fail_dummy() {}

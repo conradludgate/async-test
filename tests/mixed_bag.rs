@@ -100,7 +100,7 @@ fn normal() {
 #[test]
 fn test_mode() {
     check(
-        args(["--test"]),
+        args(["--nextest"]),
         8,
         Conclusion {
             num_filtered_out: 0,

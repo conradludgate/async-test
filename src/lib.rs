@@ -65,6 +65,8 @@
 
 #![forbid(unsafe_code)]
 
+mod nextest;
+
 use std::{
     any::TypeId,
     collections::HashSet,
@@ -74,16 +76,21 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     process,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     task::Poll,
-    time::Instant,
+    time::{Duration, Instant, SystemTime},
 };
 
 mod args;
 mod printer;
 
+use nextest::{
+    reporter::{TestEvent, TestReporter, TestReporterBuilder},
+    ExecuteStatus, RunStats, TestInstance, TestList,
+};
 use printer::Printer;
 use tokio::task::JoinSet;
+use uuid::Uuid;
 
 pub use crate::args::{Arguments, ColorSetting, FormatSetting};
 
@@ -316,8 +323,8 @@ fn setup_tests() -> (Tester, Context) {
     (tester, context)
 }
 
-#[derive(Debug)]
-struct TestInfo {
+#[derive(Debug, Clone)]
+pub(crate) struct TestInfo {
     name: String,
     kind: String,
     is_ignored: bool,
@@ -336,7 +343,7 @@ enum Outcome {
     Ignored,
 }
 
-/// Contains information about the entire test run. Is returned by[`run`].
+/// Contains information about the entire test run. Is returned by [`run`].
 ///
 /// This type is marked as `#[must_use]`. Usually, you just call
 /// [`exit()`][Conclusion::exit] on the result of `run` to exit the application
@@ -443,11 +450,27 @@ pub fn main() {
 /// [`Conclusion`] for more information. If `--list` was specified, a list is
 /// printed and a dummy `Conclusion` is returned.
 pub fn run(args: &Arguments) -> Conclusion {
-    let start_instant = Instant::now();
-    let mut conclusion = Conclusion::empty();
+    let start_instant = SystemTime::now();
 
     let (tester, _context) = setup_tests();
+
+    // If `--list` is specified, just print the list and return.
+    if args.list {
+        let mut tests = tester.inner.lock().unwrap();
+        if args.filter.is_some() || !args.skip.is_empty() || args.ignored {
+            tests.tasks.retain(|test| !args.is_filtered_out(test));
+        }
+
+        let mut printer = printer::Printer::new(args, &tests.tasks);
+        printer.print_list(&tests.tasks, args.ignored);
+        return Conclusion::empty();
+    }
+    if args.nextest {
+        return run_nextest(args, start_instant, tester);
+    }
+
     let mut tests = tester.inner.lock().unwrap();
+    let mut conclusion = Conclusion::empty();
 
     // Apply filtering
     if args.filter.is_some() || !args.skip.is_empty() || args.ignored {
@@ -551,7 +574,160 @@ pub fn run(args: &Arguments) -> Conclusion {
         printer.print_failures(&failed_tests);
     }
 
-    printer.print_summary(&conclusion, start_instant.elapsed());
+    printer.print_summary(&conclusion, start_instant.elapsed().unwrap());
+
+    conclusion
+}
+
+fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> Conclusion {
+    let mut tests = tester.inner.lock().unwrap();
+    let run_id = Uuid::new_v4();
+
+    let test_list = TestList {
+        tests: tests.tasks.iter().map(|x| x.info.clone()).collect(),
+        skip_count: OnceLock::new(),
+    };
+
+    let mut reporter = TestReporterBuilder::default()
+        .build(&test_list, nextest::reporter::ReporterStderr::Terminal);
+
+    // // Create printer which is used for all output.
+    // let mut printer = printer::Printer::new(args, &tests.tasks);
+
+    // Print number of tests
+    // printer.print_title(tests.tasks.len() as u64);
+
+    reporter
+        .report_event(TestEvent::RunStarted {
+            test_list: &test_list,
+            run_id,
+        })
+        .unwrap();
+
+    let mut conclusion = Conclusion::empty();
+
+    let mut stats = RunStats {
+        initial_run_count: tests.tasks.len(),
+        finished_count: 0,
+        passed: 0,
+        passed_slow: 0,
+        failed: 0,
+        failed_slow: 0,
+        timed_out: 0,
+        skipped: 0,
+    };
+
+    let mut handle_outcome =
+        |outcome: Outcome, test: TestInfo, reporter: &mut TestReporter, running: usize| {
+            // Handle outcome
+            let status = match outcome {
+                Outcome::Passed => {
+                    stats.passed += 1;
+                    ExecuteStatus {
+                        output: None,
+                        result: nextest::ExecutionResult::Pass,
+                        start_time: SystemTime::now(),
+                        time_taken: Duration::from_micros(1),
+                        is_slow: false,
+                        delay_before_start: Duration::ZERO,
+                    }
+                }
+                Outcome::Failed(failed) => {
+                    stats.failed += 1;
+                    ExecuteStatus {
+                        output: Some(failed),
+                        result: nextest::ExecutionResult::Pass,
+                        start_time: SystemTime::now(),
+                        time_taken: Duration::from_micros(1),
+                        is_slow: false,
+                        delay_before_start: Duration::ZERO,
+                    }
+                }
+                Outcome::Ignored => {
+                    stats.skipped += 1;
+                    return;
+                }
+            };
+            reporter
+                .report_event(TestEvent::TestFinished {
+                    test_instance: TestInstance { name: test.name },
+                    success_output: nextest::reporter::TestOutputDisplay::Never,
+                    failure_output: nextest::reporter::TestOutputDisplay::Final,
+                    junit_store_success_output: false,
+                    junit_store_failure_output: false,
+                    run_status: status,
+                    current_stats: stats,
+                    running,
+                    cancel_state: None,
+                })
+                .unwrap();
+        };
+
+    let mut set = JoinSet::new();
+
+    let threads = match args.test_threads.and_then(NonZeroUsize::new) {
+        None => std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap()),
+        Some(num_threads) => num_threads,
+    };
+
+    let mut runtime;
+
+    match threads.get() {
+        1 => runtime = tokio::runtime::Builder::new_current_thread(),
+        num_threads => {
+            runtime = tokio::runtime::Builder::new_multi_thread();
+            runtime.worker_threads(num_threads - 1);
+        }
+    };
+
+    runtime.enable_all();
+    let runtime = runtime.build().unwrap();
+
+    let tasks = match args.test_tasks.and_then(NonZeroUsize::new) {
+        Some(tasks) => tasks,
+        None => threads,
+    };
+
+    std::panic::set_hook(Box::new(|_info| {}));
+
+    for test in tests.tasks.drain(..) {
+        if set.len() >= tasks.get() {
+            let (outcome, test_info) = runtime
+                .block_on(set.join_next())
+                .expect("join set should contain at least 1 test")
+                .expect("all test panics should be caught");
+
+            handle_outcome(outcome, test_info, &mut reporter, set.len());
+        }
+        if args.is_ignored(&test) {
+            handle_outcome(Outcome::Ignored, test.info, &mut reporter, set.len());
+        } else {
+            set.spawn_on(run_single(test.runner, test.info), runtime.handle());
+        }
+    }
+
+    while let Some(res) = runtime.block_on(set.join_next()) {
+        let (outcome, test_info) = res.expect("all test panics should be caught");
+        handle_outcome(outcome, test_info, &mut reporter, set.len());
+    }
+
+    let _ = std::panic::take_hook();
+
+    reporter
+        .report_event(TestEvent::RunFinished {
+            run_id,
+            start_time: start_instant,
+            elapsed: start_instant.elapsed().unwrap(),
+            run_stats: stats,
+        })
+        .unwrap();
+
+    // // Print failures if there were any, and the final summary.
+    // if !failed_tests.is_empty() {
+    //     printer.print_failures(&failed_tests);
+    // }
+
+    // printer.print_summary(&conclusion, start_instant.elapsed());
 
     conclusion
 }
