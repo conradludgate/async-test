@@ -432,7 +432,6 @@ impl Arguments {
     }
 }
 
-
 /// Runs all given tests.
 ///
 /// This is the central function of this crate. It provides the framework for
@@ -525,23 +524,30 @@ pub fn run(args: &Arguments) -> Conclusion {
                 .expect("join set should contain at least 1 test")
                 .expect("all test panics should be caught");
 
-            printer.print_test(&test_info);
+            if tasks.get() > 1 {
+                printer.print_test(&test_info);
+            }
             handle_outcome(outcome, test_info, &mut printer);
         }
         if args.is_ignored(&test) {
             printer.print_test(&test.info);
             handle_outcome(Outcome::Ignored, test.info, &mut printer);
         } else {
+            // In multithreaded mode, we do only print the start of the line
+            // after the test ran, as otherwise it would lead to terribly
+            // interleaved output.
+            if tasks.get() == 1 {
+                printer.print_test(&test.info);
+            }
             set.spawn_on(run_single(test.runner, test.info), runtime.handle());
         }
     }
 
     while let Some(res) = runtime.block_on(set.join_next()) {
         let (outcome, test_info) = res.expect("all test panics should be caught");
-        // In multithreaded mode, we do only print the start of the line
-        // after the test ran, as otherwise it would lead to terribly
-        // interleaved output.
-        printer.print_test(&test_info);
+        if tasks.get() > 1 {
+            printer.print_test(&test_info);
+        }
         handle_outcome(outcome, test_info, &mut printer);
     }
 
@@ -587,4 +593,41 @@ async fn run_single(
     .await;
 
     (res, info)
+}
+
+#[macro_export]
+macro_rules! test {
+    ($vis:vis async fn $name:ident() $body:block) => {
+        $vis async fn $name() {
+            {
+                $crate::__sus::inventory::submit! { $crate::__sus::TestBuilder(test_builder) }
+                fn test_builder(tester: $crate::Tester) {
+                    tester.add($crate::Trial::test(stringify!($name), || async { $body }));
+                }
+            }
+            {
+                $body
+            }
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! tests {
+    ($vis:vis fn $name:ident($tester:ident: $tester_ty:ty) $body:block) => {
+        $vis fn $name($tester: $tester_ty) {
+            {
+                $crate::__sus::inventory::submit! { $crate::__sus::TestBuilder($name) }
+            }
+            {
+                $body
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+pub mod __sus {
+    pub use crate::TestBuilder;
+    pub use inventory;
 }
