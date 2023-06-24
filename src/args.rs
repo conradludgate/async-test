@@ -6,7 +6,7 @@ use clap::{Parser, ValueEnum};
 /// method is [`from_args`][Arguments::from_args] which reads the global
 /// `std::env::args()` and parses them into this type.
 ///
-/// `libtest-mimic` supports a subset of all args/flags supported by the
+/// `async-test` supports a subset of all args/flags supported by the
 /// official test harness. There are also some other minor CLI differences, but
 /// the main use cases should work exactly like with the built-in harness.
 #[derive(Parser, Debug, Clone, Default)]
@@ -42,10 +42,10 @@ pub struct Arguments {
     #[arg(long = "list", help = "List all tests and benchmarks")]
     pub list: bool,
 
-    /// No-op, ignored (libtest-mimic always runs in no-capture mode)
+    /// No-op, ignored (async-test always runs in no-capture mode)
     #[arg(
         long = "nocapture",
-        help = "No-op (libtest-mimic always runs in no-capture mode)"
+        help = "No-op (async-test always runs in no-capture mode)"
     )]
     pub nocapture: bool,
 

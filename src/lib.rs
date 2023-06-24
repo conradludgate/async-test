@@ -8,7 +8,7 @@
 //!
 //! For a small real world example, see [`examples/tidy.rs`][1].
 //!
-//! [1]: https://github.com/LukasKalbertodt/libtest-mimic/blob/master/examples/tidy.rs
+//! [1]: https://github.com/conradludgate/async-test/blob/master/examples/tidy.rs
 //!
 //! # Usage
 //!
@@ -54,7 +54,7 @@
 //!
 //! # Known limitations and differences to the official test harness
 //!
-//! `libtest-mimic` works on a best-effort basis: it tries to be as close to
+//! `async-test` works on a best-effort basis: it tries to be as close to
 //! `libtest` as possible, but there are differences for a variety of reasons.
 //! For example, some rarely used features might not be implemented, some
 //! features are extremely difficult to implement, and removing minor,
@@ -64,11 +64,8 @@
 //!
 //! - Output capture and `--nocapture`: simply not supported. The official
 //!   `libtest` uses internal `std` functions to temporarily redirect output.
-//!   `libtest-mimic` cannot use those. See [this issue][capture] for more
-//!   information.
+//!   `async-test` cannot use those.
 //! - `--format=json|junit`
-//!
-//! [capture]: https://github.com/LukasKalbertodt/libtest-mimic/issues/9
 
 #![forbid(unsafe_code)]
 

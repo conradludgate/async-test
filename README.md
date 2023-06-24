@@ -1,8 +1,8 @@
-# libtest-mimic
+# async-test
 
-[<img alt="CI status of master" src="https://img.shields.io/github/actions/workflow/status/LukasKalbertodt/libtest-mimic/ci.yml?branch=master&label=CI&logo=github&logoColor=white&style=for-the-badge" height="23">](https://github.com/LukasKalbertodt/libtest-mimic/actions?query=workflow%3ACI+branch%3Amaster)
-[<img alt="Crates.io Version" src="https://img.shields.io/crates/v/libtest-mimic?logo=rust&style=for-the-badge" height="23">](https://crates.io/crates/libtest-mimic)
-[<img alt="docs.rs" src="https://img.shields.io/crates/v/libtest-mimic?color=blue&label=docs&style=for-the-badge" height="23">](https://docs.rs/libtest-mimic)
+[<img alt="CI status of master" src="https://img.shields.io/github/actions/workflow/status/conradludgate/async-test/ci.yml?branch=master&label=CI&logo=github&logoColor=white&style=for-the-badge" height="23">](https://github.com/conradludgate/async-test/actions?query=workflow%3ACI+branch%3Amaster)
+[<img alt="Crates.io Version" src="https://img.shields.io/crates/v/async-test?logo=rust&style=for-the-badge" height="23">](https://crates.io/crates/async-test)
+[<img alt="docs.rs" src="https://img.shields.io/crates/v/async-test?color=blue&label=docs&style=for-the-badge" height="23">](https://docs.rs/async-test)
 
 Write your own test harness that looks and behaves like the built-in test harness (used by `rustc --test`)!
 
@@ -10,7 +10,7 @@ This is a simple and small testing framework that mimics the original `libtest`.
 That means: all output looks pretty much like `cargo test` and most CLI arguments are understood and used.
 With that plumbing work out of the way, your test runner can focus on the actual testing.
 
-See [**the documentation**](https://docs.rs/libtest-mimic) or [the `examples/` folder](/examples) for more information.
+See [**the documentation**](https://docs.rs/async-test) or [the `examples/` folder](/examples) for more information.
 
 
 <p align="center">
