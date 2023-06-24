@@ -142,7 +142,7 @@ pub enum ReporterStderr<'a> {
     Terminal,
 
     /// Write output to a buffer.
-    Buffer(&'a mut Vec<u8>),
+    Buffer(&'a mut dyn io::Write),
 }
 
 /// Test reporter builder.
@@ -315,7 +315,7 @@ impl TestReporterBuilder {
 enum ReporterStderrImpl<'a> {
     TerminalWithBar(ProgressBar),
     TerminalWithoutBar,
-    Buffer(&'a mut Vec<u8>),
+    Buffer(&'a mut dyn std::io::Write),
 }
 
 /// Functionality to report test results to stderr and JUnit

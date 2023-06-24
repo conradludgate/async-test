@@ -85,7 +85,7 @@ mod args;
 mod printer;
 
 use nextest::{
-    reporter::{TestEvent, TestReporter, TestReporterBuilder},
+    reporter::{ReporterStderr, TestEvent, TestReporter, TestReporterBuilder},
     ExecuteStatus, RunStats, TestInstance, TestList,
 };
 use printer::Printer;
@@ -535,7 +535,7 @@ pub fn run(args: &Arguments) -> Conclusion {
 
     for test in tests.tasks.drain(..) {
         if set.len() >= tasks.get() {
-            let (outcome, test_info) = runtime
+            let (outcome, test_info, _) = runtime
                 .block_on(set.join_next())
                 .expect("join set should contain at least 1 test")
                 .expect("all test panics should be caught");
@@ -560,7 +560,7 @@ pub fn run(args: &Arguments) -> Conclusion {
     }
 
     while let Some(res) = runtime.block_on(set.join_next()) {
-        let (outcome, test_info) = res.expect("all test panics should be caught");
+        let (outcome, test_info, _) = res.expect("all test panics should be caught");
         if tasks.get() > 1 {
             printer.print_test(&test_info);
         }
@@ -588,14 +588,30 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         skip_count: OnceLock::new(),
     };
 
-    let mut reporter = TestReporterBuilder::default()
-        .build(&test_list, nextest::reporter::ReporterStderr::Terminal);
+    let mut output = args
+        .logfile
+        .as_deref()
+        .map(|f| std::fs::File::create(f).unwrap());
+    let report_output = match &mut output {
+        Some(file) => ReporterStderr::Buffer(file),
+        None => ReporterStderr::Terminal,
+    };
 
-    // // Create printer which is used for all output.
-    // let mut printer = printer::Printer::new(args, &tests.tasks);
+    let mut reporter = TestReporterBuilder::default().build(&test_list, report_output);
 
-    // Print number of tests
-    // printer.print_title(tests.tasks.len() as u64);
+    match args.color.unwrap_or(ColorSetting::Auto) {
+        ColorSetting::Auto => match args.logfile.is_some() {
+            true => {}
+            false => {
+                if supports_color::on(supports_color::Stream::Stderr).map_or(false, |x| x.has_basic)
+                {
+                    reporter.colorize();
+                }
+            }
+        },
+        ColorSetting::Always => reporter.colorize(),
+        ColorSetting::Never => {}
+    }
 
     reporter
         .report_event(TestEvent::RunStarted {
@@ -617,51 +633,54 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         skipped: 0,
     };
 
-    let mut handle_outcome =
-        |outcome: Outcome, test: TestInfo, reporter: &mut TestReporter, running: usize| {
-            // Handle outcome
-            let status = match outcome {
-                Outcome::Passed => {
-                    stats.passed += 1;
-                    ExecuteStatus {
-                        output: None,
-                        result: nextest::ExecutionResult::Pass,
-                        start_time: SystemTime::now(),
-                        time_taken: Duration::from_micros(1),
-                        is_slow: false,
-                        delay_before_start: Duration::ZERO,
-                    }
+    let handle_outcome = |outcome: Outcome,
+                          test: TestInfo,
+                          start: SystemTime,
+                          reporter: &mut TestReporter,
+                          running: usize,
+                          stats: &mut RunStats| {
+        // Handle outcome
+        let status = match outcome {
+            Outcome::Passed => {
+                stats.passed += 1;
+                stats.finished_count += 1;
+                ExecuteStatus {
+                    output: None,
+                    result: nextest::ExecutionResult::Pass,
+                    start_time: start,
+                    time_taken: start.elapsed().unwrap(),
+                    is_slow: false,
+                    delay_before_start: Duration::ZERO,
                 }
-                Outcome::Failed(failed) => {
-                    stats.failed += 1;
-                    ExecuteStatus {
-                        output: Some(failed),
-                        result: nextest::ExecutionResult::Pass,
-                        start_time: SystemTime::now(),
-                        time_taken: Duration::from_micros(1),
-                        is_slow: false,
-                        delay_before_start: Duration::ZERO,
-                    }
+            }
+            Outcome::Failed(failed) => {
+                stats.failed += 1;
+                stats.finished_count += 1;
+                ExecuteStatus {
+                    output: Some(failed),
+                    result: nextest::ExecutionResult::Fail,
+                    start_time: start,
+                    time_taken: start.elapsed().unwrap(),
+                    is_slow: false,
+                    delay_before_start: Duration::ZERO,
                 }
-                Outcome::Ignored => {
-                    stats.skipped += 1;
-                    return;
-                }
-            };
-            reporter
-                .report_event(TestEvent::TestFinished {
-                    test_instance: TestInstance { name: test.name },
-                    success_output: nextest::reporter::TestOutputDisplay::Never,
-                    failure_output: nextest::reporter::TestOutputDisplay::Final,
-                    junit_store_success_output: false,
-                    junit_store_failure_output: false,
-                    run_status: status,
-                    current_stats: stats,
-                    running,
-                    cancel_state: None,
-                })
-                .unwrap();
+            }
+            Outcome::Ignored => return,
         };
+        reporter
+            .report_event(TestEvent::TestFinished {
+                test_instance: TestInstance { name: test.name },
+                success_output: nextest::reporter::TestOutputDisplay::Never,
+                failure_output: nextest::reporter::TestOutputDisplay::Final,
+                junit_store_success_output: false,
+                junit_store_failure_output: false,
+                run_status: status,
+                current_stats: *stats,
+                running,
+                cancel_state: None,
+            })
+            .unwrap();
+    };
 
     let mut set = JoinSet::new();
 
@@ -692,23 +711,37 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
 
     for test in tests.tasks.drain(..) {
         if set.len() >= tasks.get() {
-            let (outcome, test_info) = runtime
+            let (outcome, test_info, start) = runtime
                 .block_on(set.join_next())
                 .expect("join set should contain at least 1 test")
                 .expect("all test panics should be caught");
 
-            handle_outcome(outcome, test_info, &mut reporter, set.len());
+            handle_outcome(
+                outcome,
+                test_info,
+                start,
+                &mut reporter,
+                set.len(),
+                &mut stats,
+            );
         }
         if args.is_ignored(&test) {
-            handle_outcome(Outcome::Ignored, test.info, &mut reporter, set.len());
+            stats.skipped += 1;
         } else {
             set.spawn_on(run_single(test.runner, test.info), runtime.handle());
         }
     }
 
     while let Some(res) = runtime.block_on(set.join_next()) {
-        let (outcome, test_info) = res.expect("all test panics should be caught");
-        handle_outcome(outcome, test_info, &mut reporter, set.len());
+        let (outcome, test_info, start) = res.expect("all test panics should be caught");
+        handle_outcome(
+            outcome,
+            test_info,
+            start,
+            &mut reporter,
+            set.len(),
+            &mut stats,
+        );
     }
 
     let _ = std::panic::take_hook();
@@ -736,9 +769,10 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
 async fn run_single(
     runner: Box<dyn FnOnce() -> Box<dyn Future<Output = ()> + Send> + Send>,
     info: TestInfo,
-) -> (Outcome, TestInfo) {
+) -> (Outcome, TestInfo, SystemTime) {
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
+    let start = SystemTime::now();
     let mut fut: Pin<Box<dyn Future<Output = ()> + Send>> = runner().into();
 
     let res = std::future::poll_fn(|cx| {
@@ -763,7 +797,7 @@ async fn run_single(
     })
     .await;
 
-    (res, info)
+    (res, info, start)
 }
 
 #[macro_export]
