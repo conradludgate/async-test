@@ -74,6 +74,7 @@ use std::{
     future::Future,
     hash::Hash,
     num::NonZeroUsize,
+    os::macos::raw::stat,
     pin::Pin,
     process,
     sync::{Arc, Mutex, OnceLock},
@@ -89,7 +90,7 @@ use nextest::{
     ExecuteStatus, RunStats, TestInstance, TestList,
 };
 use printer::Printer;
-use tokio::task::JoinSet;
+use tokio::{sync::Semaphore, task::JoinSet};
 use uuid::Uuid;
 
 pub use crate::args::{Arguments, ColorSetting, FormatSetting};
@@ -531,8 +532,6 @@ pub fn run(args: &Arguments) -> Conclusion {
         None => threads,
     };
 
-    std::panic::set_hook(Box::new(|_info| {}));
-
     for test in tests.tasks.drain(..) {
         if set.len() >= tasks.get() {
             let (outcome, test_info, _) = runtime
@@ -566,8 +565,6 @@ pub fn run(args: &Arguments) -> Conclusion {
         }
         handle_outcome(outcome, test_info, &mut printer);
     }
-
-    let _ = std::panic::take_hook();
 
     // Print failures if there were any, and the final summary.
     if !failed_tests.is_empty() {
@@ -613,76 +610,7 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         ColorSetting::Never => {}
     }
 
-    reporter
-        .report_event(TestEvent::RunStarted {
-            test_list: &test_list,
-            run_id,
-        })
-        .unwrap();
-
     let conclusion = Conclusion::empty();
-
-    let mut stats = RunStats {
-        initial_run_count: tests.tasks.len(),
-        finished_count: 0,
-        passed: 0,
-        passed_slow: 0,
-        failed: 0,
-        failed_slow: 0,
-        timed_out: 0,
-        skipped: 0,
-    };
-
-    let handle_outcome = |outcome: Outcome,
-                          test: TestInfo,
-                          start: SystemTime,
-                          reporter: &mut TestReporter,
-                          running: usize,
-                          stats: &mut RunStats| {
-        // Handle outcome
-        let status = match outcome {
-            Outcome::Passed => {
-                stats.passed += 1;
-                stats.finished_count += 1;
-                ExecuteStatus {
-                    output: None,
-                    result: nextest::ExecutionResult::Pass,
-                    start_time: start,
-                    time_taken: start.elapsed().unwrap(),
-                    is_slow: false,
-                    delay_before_start: Duration::ZERO,
-                }
-            }
-            Outcome::Failed(failed) => {
-                stats.failed += 1;
-                stats.finished_count += 1;
-                ExecuteStatus {
-                    output: Some(failed),
-                    result: nextest::ExecutionResult::Fail,
-                    start_time: start,
-                    time_taken: start.elapsed().unwrap(),
-                    is_slow: false,
-                    delay_before_start: Duration::ZERO,
-                }
-            }
-            Outcome::Ignored => return,
-        };
-        reporter
-            .report_event(TestEvent::TestFinished {
-                test_instance: TestInstance { name: test.name },
-                success_output: nextest::reporter::TestOutputDisplay::Never,
-                failure_output: nextest::reporter::TestOutputDisplay::Immediate,
-                junit_store_success_output: false,
-                junit_store_failure_output: false,
-                run_status: status,
-                current_stats: *stats,
-                running,
-                cancel_state: None,
-            })
-            .unwrap();
-    };
-
-    let mut set = JoinSet::new();
 
     let threads = match args.test_threads.and_then(NonZeroUsize::new) {
         None => std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap()),
@@ -695,7 +623,7 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         1 => runtime = tokio::runtime::Builder::new_current_thread(),
         num_threads => {
             runtime = tokio::runtime::Builder::new_multi_thread();
-            runtime.worker_threads(num_threads - 1);
+            runtime.worker_threads(dbg!(num_threads - 1));
         }
     };
 
@@ -707,44 +635,178 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         None => threads,
     };
 
-    std::panic::set_hook(Box::new(|_info| {}));
+    #[derive(Debug)]
+    enum TestState {
+        Start {
+            info: TestInfo,
+        },
+        Done {
+            start: SystemTime,
+            outcome: Outcome,
+            info: TestInfo,
+            slow: bool,
+        },
+        Tick {
+            elapsed: Duration,
+            info: TestInfo,
+        },
+    }
+
+    let mut stats = RunStats {
+        initial_run_count: tests.tasks.len(),
+        finished_count: 0,
+        passed: 0,
+        passed_slow: 0,
+        failed: 0,
+        failed_slow: 0,
+        timed_out: 0,
+        skipped: 0,
+    };
+
+    // let mut active = HashSet::new();
+    let semaphore = Arc::new(Semaphore::new(tasks.get()));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(tasks.get() * 4);
 
     for test in tests.tasks.drain(..) {
-        if set.len() >= tasks.get() {
-            let (outcome, test_info, start) = runtime
-                .block_on(set.join_next())
-                .expect("join set should contain at least 1 test")
-                .expect("all test panics should be caught");
-
-            handle_outcome(
-                outcome,
-                test_info,
-                start,
-                &mut reporter,
-                set.len(),
-                &mut stats,
-            );
-        }
         if args.is_ignored(&test) {
             stats.skipped += 1;
         } else {
-            set.spawn_on(run_single(test.runner, test.info), runtime.handle());
+            let tx = tx.clone();
+            let semaphore = semaphore.clone();
+            let wait = Duration::from_secs(60);
+            let test_task = async move {
+                let _permit = semaphore.acquire_owned().await.unwrap();
+                let start = SystemTime::now();
+
+                let mut test_task = std::pin::pin!(CatchUnwind((test.runner)().into()));
+
+                tx.send(TestState::Start {
+                    info: test.info.clone(),
+                })
+                .await
+                .unwrap();
+                for i in 1.. {
+                    let res = tokio::time::timeout(wait, test_task.as_mut()).await;
+                    match res {
+                        Err(_) => {
+                            tx.send(TestState::Tick {
+                                elapsed: i * wait,
+                                info: test.info.clone(),
+                            })
+                            .await
+                            .unwrap();
+                        }
+                        Ok(outcome) => {
+                            tx.send(TestState::Done {
+                                start,
+                                outcome,
+                                info: test.info,
+                                slow: i > 1,
+                            })
+                            .await
+                            .unwrap();
+
+                            break;
+                        }
+                    }
+                }
+            };
+            runtime.spawn(test_task);
         }
     }
 
-    while let Some(res) = runtime.block_on(set.join_next()) {
-        let (outcome, test_info, start) = res.expect("all test panics should be caught");
-        handle_outcome(
-            outcome,
-            test_info,
-            start,
-            &mut reporter,
-            set.len(),
-            &mut stats,
-        );
-    }
+    drop(tx);
 
-    let _ = std::panic::take_hook();
+    reporter
+        .report_event(TestEvent::RunStarted {
+            test_list: &test_list,
+            run_id,
+        })
+        .unwrap();
+
+    let mut running = 0;
+    runtime.block_on(async {
+        loop {
+            // don't log
+            let msg = rx.recv().await;
+
+            match msg {
+                Some(TestState::Start { info }) => {
+                    running += 1;
+                    reporter
+                        .report_event(TestEvent::TestStarted {
+                            test_instance: TestInstance { name: info.name },
+                            current_stats: stats,
+                            running,
+                            cancel_state: None,
+                        })
+                        .unwrap()
+                }
+                Some(TestState::Tick { elapsed, info }) => reporter
+                    .report_event(TestEvent::TestSlow {
+                        test_instance: TestInstance { name: info.name },
+                        elapsed,
+                        will_terminate: false,
+                    })
+                    .unwrap(),
+                Some(TestState::Done {
+                    start,
+                    outcome,
+                    info,
+                    slow,
+                }) => {
+                    running -= 1;
+                    let status = match outcome {
+                        Outcome::Passed => {
+                            stats.passed += 1;
+                            stats.finished_count += 1;
+                            if slow {
+                                stats.passed_slow += 1;
+                            }
+                            ExecuteStatus {
+                                output: None,
+                                result: nextest::ExecutionResult::Pass,
+                                start_time: start,
+                                time_taken: start.elapsed().unwrap(),
+                                is_slow: false,
+                                delay_before_start: Duration::ZERO,
+                            }
+                        }
+                        Outcome::Failed(failed) => {
+                            stats.failed += 1;
+                            stats.finished_count += 1;
+                            if slow {
+                                stats.failed_slow += 1;
+                            }
+                            ExecuteStatus {
+                                output: Some(failed),
+                                result: nextest::ExecutionResult::Fail,
+                                start_time: start,
+                                time_taken: start.elapsed().unwrap(),
+                                is_slow: false,
+                                delay_before_start: Duration::ZERO,
+                            }
+                        }
+                        Outcome::Ignored => return,
+                    };
+                    reporter
+                        .report_event(TestEvent::TestFinished {
+                            test_instance: TestInstance { name: info.name },
+                            success_output: nextest::reporter::TestOutputDisplay::Never,
+                            failure_output: nextest::reporter::TestOutputDisplay::Immediate,
+                            junit_store_success_output: false,
+                            junit_store_failure_output: false,
+                            run_status: status,
+                            current_stats: stats,
+                            running,
+                            cancel_state: None,
+                        })
+                        .unwrap();
+                }
+                None => break,
+            }
+        }
+    });
 
     reporter
         .report_event(TestEvent::RunFinished {
@@ -770,13 +832,26 @@ async fn run_single(
     runner: Box<dyn FnOnce() -> Box<dyn Future<Output = ()> + Send> + Send>,
     info: TestInfo,
 ) -> (Outcome, TestInfo, SystemTime) {
-    use std::panic::{catch_unwind, AssertUnwindSafe};
-
     let start = SystemTime::now();
-    let mut fut: Pin<Box<dyn Future<Output = ()> + Send>> = runner().into();
 
-    let res = std::future::poll_fn(|cx| {
-        catch_unwind(AssertUnwindSafe(|| fut.as_mut().poll(cx))).map_or_else(
+    let res = CatchUnwind(runner().into()).await;
+
+    (res, info, start)
+}
+
+struct CatchUnwind(Pin<Box<dyn Future<Output = ()> + Send>>);
+impl Future for CatchUnwind {
+    type Output = Outcome;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        // don't log panics, catch and record them instead
+        std::panic::set_hook(Box::new(|_info| {}));
+        let res = catch_unwind(AssertUnwindSafe(|| self.0.as_mut().poll(cx)));
+        let _ = std::panic::take_hook();
+
+        res.map_or_else(
             |e| {
                 // The `panic` information is just an `Any` object representing the
                 // value the panic was invoked with. For most panics (which use
@@ -794,10 +869,7 @@ async fn run_single(
                 Poll::Pending => Poll::Pending,
             },
         )
-    })
-    .await;
-
-    (res, info, start)
+    }
 }
 
 #[macro_export]
