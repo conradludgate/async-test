@@ -30,12 +30,11 @@ use std::{
     io::{BufWriter, Write},
     time::{Duration, SystemTime},
 };
-use uuid::Uuid;
 
 use self::aggregator::{EventAggregator, WriteEventError};
 
 use super::{
-    ExecuteStatus, ExecutionDescription, ExecutionResult, RunStats, TestInstance, TestList,
+    ExecuteStatus, ExecutionDescription, ExecutionResult, RunStats, TestInstance, TestList, MismatchReason,
 };
 
 /// When to display test output in the reporter.
@@ -148,7 +147,6 @@ pub enum ReporterStderr<'a> {
 /// Test reporter builder.
 #[derive(Debug, Default)]
 pub struct TestReporterBuilder {
-    no_capture: bool,
     failure_output: Option<TestOutputDisplay>,
     success_output: Option<TestOutputDisplay>,
     status_level: Option<StatusLevel>,
@@ -158,15 +156,6 @@ pub struct TestReporterBuilder {
 }
 
 impl TestReporterBuilder {
-    /// Sets no-capture mode.
-    ///
-    /// In this mode, `failure_output` and `success_output` will be ignored, and `status_level`
-    /// will be at least [`StatusLevel::Pass`].
-    pub fn set_no_capture(&mut self, no_capture: bool) -> &mut Self {
-        self.no_capture = no_capture;
-        self
-    }
-
     /// Sets the conditions under which test failures are output.
     pub fn set_failure_output(&mut self, failure_output: TestOutputDisplay) -> &mut Self {
         self.failure_output = Some(failure_output);
@@ -213,47 +202,15 @@ impl TestReporterBuilder {
         output: ReporterStderr<'a>,
     ) -> TestReporter<'a> {
         let styles = Box::default();
-        // let binary_id_width = test_list
-        //     .iter()
-        //     .filter_map(|test_suite| {
-        //         (test_suite.status.test_count() > 0).then_some(test_suite.binary_id.len())
-        //     })
-        //     .max()
-        //     .unwrap_or_default();
         let aggregator = EventAggregator::new();
 
-        let status_level = self.status_level.unwrap_or(StatusLevel::All); //.unwrap_or_else(|| profile.status_level());
-        let status_level = match self.no_capture {
-            // In no-capture mode, the status level is treated as at least pass.
-            true => status_level.max(StatusLevel::Pass),
-            false => status_level,
-        };
+        let status_level = self.status_level.unwrap_or(StatusLevel::All);
         let final_status_level = self.final_status_level.unwrap_or(FinalStatusLevel::Slow);
-        // .unwrap_or_else(|| profile.final_status_level());
 
-        // failure_output and success_output are meaningless if the runner isn't capturing any
-        // output.
-        let force_success_output = match self.no_capture {
-            true => Some(TestOutputDisplay::Never),
-            false => self.success_output,
-        };
-        let force_failure_output = match self.no_capture {
-            true => Some(TestOutputDisplay::Never),
-            false => self.failure_output,
-        };
+        let force_success_output = self.success_output;
+        let force_failure_output = self.failure_output;
 
         let stderr = match output {
-            ReporterStderr::Terminal if self.no_capture => {
-                // Do not use a progress bar if --no-capture is passed in. This is required since we
-                // pass down stderr to the child process.
-                //
-                // In the future, we could potentially switch to using a pty, in which case we could
-                // still potentially use the progress bar as a status bar. However, that brings
-                // about its own complications: what if a test's output doesn't include a newline?
-                // We might have to use a curses-like UI which would be a lot of work for not much
-                // gain.
-                ReporterStderrImpl::TerminalWithoutBar
-            }
             // ReporterStderr::Terminal if is_ci::uncached() => {
             //     // Some CI environments appear to pretend to be a terminal. Disable the progress bar
             //     // in these environments.
@@ -302,8 +259,6 @@ impl TestReporterBuilder {
                 final_status_level,
                 force_success_output,
                 force_failure_output,
-                no_capture: self.no_capture,
-                // binary_id_width,
                 styles,
                 cancel_status: None,
                 final_outputs: DebugIgnore(vec![]),
@@ -497,7 +452,7 @@ fn write_summary_str(run_stats: &RunStats, styles: &Styles, out: &mut String) ->
 
 #[derive(Debug)]
 enum FinalOutput {
-    Skipped,
+    Skipped(MismatchReason),
     Executed {
         run_status: ExecuteStatus,
         test_output_display: TestOutputDisplay,
@@ -507,7 +462,7 @@ enum FinalOutput {
 impl FinalOutput {
     fn final_status_level(&self) -> FinalStatusLevel {
         match self {
-            Self::Skipped => FinalStatusLevel::Skip,
+            Self::Skipped { .. } => FinalStatusLevel::Skip,
             Self::Executed { run_status, .. } => run_status.describe().final_status_level(),
         }
     }
@@ -517,7 +472,6 @@ struct TestReporterImpl {
     status_level: StatusLevel,
     force_success_output: Option<TestOutputDisplay>,
     force_failure_output: Option<TestOutputDisplay>,
-    no_capture: bool,
     // binary_id_width: usize,
     final_status_level: FinalStatusLevel,
     styles: Box<Styles>,
@@ -556,22 +510,9 @@ impl<'a> TestReporterImpl {
 
                 writeln!(writer)?;
             }
-            TestEvent::TestStarted { test_instance, .. } => {
-                // In no-capture mode, print out a test start event.
-                if self.no_capture {
-                    // The spacing is to align test instances.
-                    write!(
-                        writer,
-                        "{:>12}             ",
-                        "START".style(self.styles.pass),
-                    )?;
-                    self.write_instance(test_instance.clone(), writer)?;
-                    writeln!(writer)?;
-                }
-            }
+            TestEvent::TestStarted { .. } => {}
             TestEvent::TestSlow {
                 test_instance,
-                // retry_data,
                 elapsed,
                 will_terminate,
             } => {
@@ -583,7 +524,7 @@ impl<'a> TestReporterImpl {
                 }
 
                 self.write_slow_duration(*elapsed, writer)?;
-                self.write_instance(test_instance.clone(), writer)?;
+                self.write_instance(test_instance, writer)?;
                 writeln!(writer)?;
             }
 
@@ -602,7 +543,7 @@ impl<'a> TestReporterImpl {
                 };
 
                 if self.status_level >= describe.status_level() {
-                    self.write_status_line(test_instance.clone(), describe, writer)?;
+                    self.write_status_line(test_instance, describe, writer)?;
 
                     // If the test failed to execute, print its output and error status.
                     // (don't print out test failures after Ctrl-C)
@@ -629,15 +570,15 @@ impl<'a> TestReporterImpl {
             }
             TestEvent::TestSkipped {
                 test_instance,
-                // reason,
+                reason,
             } => {
                 if self.status_level >= StatusLevel::Skip {
-                    self.write_skip_line(test_instance.clone(), writer)?;
+                    self.write_skip_line(test_instance, writer)?;
                 }
-                // if self.final_status_level >= FinalStatusLevel::Skip {
-                //     self.final_outputs
-                //         .push((test_instance.clone(), FinalOutput::Skipped(*reason)));
-                // }
+                if self.final_status_level >= FinalStatusLevel::Skip {
+                    self.final_outputs
+                        .push((test_instance.clone(), FinalOutput::Skipped(*reason)));
+                }
             }
             TestEvent::RunBeginCancel { running, reason } => {
                 self.cancel_status = self.cancel_status.max(Some(*reason));
@@ -738,8 +679,8 @@ impl<'a> TestReporterImpl {
                 for (test_instance, final_output) in &*self.final_outputs {
                     let final_status_level = final_output.final_status_level();
                     match final_output {
-                        FinalOutput::Skipped => {
-                            self.write_skip_line(test_instance.clone(), writer)?;
+                        FinalOutput::Skipped(_) => {
+                            self.write_skip_line(test_instance, writer)?;
                         }
                         FinalOutput::Executed {
                             run_status,
@@ -753,18 +694,13 @@ impl<'a> TestReporterImpl {
                                 || test_output_display.is_final()
                             {
                                 self.write_final_status_line(
-                                    test_instance.clone(),
+                                    test_instance,
                                     run_status.describe(),
                                     writer,
                                 )?;
                             }
                             if test_output_display.is_final() {
-                                self.write_stdout_stderr(
-                                    test_instance,
-                                    run_status,
-                                    false,
-                                    writer,
-                                )?;
+                                self.write_stdout_stderr(test_instance, run_status, false, writer)?;
                             }
                         }
                     }
@@ -778,7 +714,7 @@ impl<'a> TestReporterImpl {
 
     fn write_skip_line(
         &self,
-        test_instance: TestInstance,
+        test_instance: &TestInstance,
         writer: &mut impl Write,
     ) -> io::Result<()> {
         write!(writer, "{:>12} ", "SKIP".style(self.styles.skip))?;
@@ -793,7 +729,7 @@ impl<'a> TestReporterImpl {
 
     fn write_status_line(
         &self,
-        test_instance: TestInstance,
+        test_instance: &TestInstance,
         describe: ExecutionDescription<'_>,
         writer: &mut impl Write,
     ) -> io::Result<()> {
@@ -802,14 +738,6 @@ impl<'a> TestReporterImpl {
                 write!(writer, "{:>12} ", "PASS".style(self.styles.pass))?;
                 status
             }
-            // ExecutionDescription::Flaky { .. } => {
-            //     // Use the skip color to also represent a flaky test.
-            //     write!(
-            //         writer,
-            //         "{:>12} ",
-            //         format!("TRY {} PASS", last_status.retry_data.attempt).style(self.styles.skip)
-            //     )?;
-            // }
             ExecutionDescription::Failure { status } => {
                 write!(
                     writer,
@@ -832,7 +760,7 @@ impl<'a> TestReporterImpl {
 
     fn write_final_status_line(
         &self,
-        test_instance: TestInstance,
+        test_instance: &TestInstance,
         describe: ExecutionDescription<'_>,
         writer: &mut impl Write,
     ) -> io::Result<()> {
@@ -867,7 +795,7 @@ impl<'a> TestReporterImpl {
         Ok(())
     }
 
-    fn write_instance(&self, instance: TestInstance, writer: &mut impl Write) -> io::Result<()> {
+    fn write_instance(&self, instance: &TestInstance, writer: &mut impl Write) -> io::Result<()> {
         write!(writer, "{:>width$} ", "test_suite", width = 4)?;
 
         write_test_name(&instance.name, &self.styles.list_styles, writer)
@@ -880,12 +808,12 @@ impl<'a> TestReporterImpl {
         write!(writer, "[{:>8.3?}s] ", duration.as_secs_f64())
     }
 
-    fn write_duration_by(&self, duration: Duration, writer: &mut impl Write) -> io::Result<()> {
-        // * > means right-align.
-        // * 7 is the number of characters to pad to.
-        // * .3 means print three digits after the decimal point.
-        write!(writer, "by {:>7.3?}s ", duration.as_secs_f64())
-    }
+    // fn write_duration_by(&self, duration: Duration, writer: &mut impl Write) -> io::Result<()> {
+    //     // * > means right-align.
+    //     // * 7 is the number of characters to pad to.
+    //     // * .3 means print three digits after the decimal point.
+    //     write!(writer, "by {:>7.3?}s ", duration.as_secs_f64())
+    // }
 
     fn write_slow_duration(&self, duration: Duration, writer: &mut impl Write) -> io::Result<()> {
         // Inside the curly braces:
@@ -893,23 +821,6 @@ impl<'a> TestReporterImpl {
         // * 7 is the number of characters to pad to.
         // * .3 means print three digits after the decimal point.
         write!(writer, "[>{:>7.3?}s] ", duration.as_secs_f64())
-    }
-
-    #[cfg(windows)]
-    fn write_windows_message_line(
-        &self,
-        nt_status: windows::Win32::Foundation::NTSTATUS,
-        writer: &mut impl Write,
-    ) -> io::Result<()> {
-        write!(writer, "{:>12} ", "Message".style(self.styles.fail))?;
-        write!(writer, "[         ] ")?;
-        writeln!(
-            writer,
-            "code {}",
-            crate::helpers::display_nt_status(nt_status)
-        )?;
-
-        Ok(())
     }
 
     fn write_stdout_stderr(
@@ -937,7 +848,7 @@ impl<'a> TestReporterImpl {
                 "STDOUT:".style(header_style),
                 width = 21
             )?;
-            self.write_instance(test_instance.clone(), writer)?;
+            self.write_instance(test_instance, writer)?;
             writeln!(writer, "{}", " ---".style(header_style))?;
 
             self.write_test_output(output.as_bytes(), writer)?;
@@ -1046,14 +957,14 @@ fn status_str(result: ExecutionResult) -> Cow<'static, str> {
     }
 }
 
-fn short_status_str(result: ExecutionResult) -> Cow<'static, str> {
-    // Use shorter strings for this (max 6 characters).
-    match result {
-        ExecutionResult::Fail => "FAIL".into(),
-        ExecutionResult::Pass => "PASS".into(),
-        ExecutionResult::Timeout => "TMT".into(),
-    }
-}
+// fn short_status_str(result: ExecutionResult) -> Cow<'static, str> {
+//     // Use shorter strings for this (max 6 characters).
+//     match result {
+//         ExecutionResult::Fail => "FAIL".into(),
+//         ExecutionResult::Pass => "PASS".into(),
+//         ExecutionResult::Timeout => "TMT".into(),
+//     }
+// }
 
 /// A test event.
 ///
@@ -1066,18 +977,14 @@ pub(crate) enum TestEvent<'a> {
         ///
         /// The methods on the test list indicate the number of tests that will be run.
         test_list: &'a TestList,
-
-        /// The UUID for this run.
-        run_id: Uuid,
+        // /// The UUID for this run.
+        // run_id: Uuid,
     },
 
-    // TODO: add events for BinaryStarted and BinaryFinished? May want a slightly different way to
-    // do things, maybe a couple of reporter traits (one for the run as a whole and one for each
-    // binary).
     /// A test started running.
     TestStarted {
-        /// The test instance that was started.
-        test_instance: TestInstance,
+        // /// The test instance that was started.
+        // test_instance: TestInstance,
 
         /// Current run statistics so far.
         current_stats: RunStats,
@@ -1103,31 +1010,6 @@ pub(crate) enum TestEvent<'a> {
         will_terminate: bool,
     },
 
-    // /// A test attempt failed and will be retried in the future.
-    // ///
-    // /// This event does not occur on the final run of a failing test.
-    // TestAttemptFailedWillRetry {
-    //     /// The test instance that is being retried.
-    //     test_instance: TestInstance,
-
-    //     /// The status of this attempt to run the test. Will never be success.
-    //     run_status: ExecuteStatus,
-
-    //     /// The delay before the next attempt to run the test.
-    //     delay_before_next_attempt: Duration,
-
-    //     /// Whether failure outputs are printed out.
-    //     failure_output: TestOutputDisplay,
-    // },
-
-    // /// A retry has started.
-    // TestRetryStarted {
-    //     /// The test instance that is being retried.
-    //     test_instance: TestInstance,
-
-    //     /// Data related to retries.
-    //     retry_data: RetryData,
-    // },
     /// A test finished running.
     TestFinished {
         /// The test instance that finished running.
@@ -1162,8 +1044,8 @@ pub(crate) enum TestEvent<'a> {
     TestSkipped {
         /// The test instance that was skipped.
         test_instance: TestInstance,
-        // /// The reason this test was skipped.
-        // reason: MismatchReason,
+        /// The reason this test was skipped.
+        reason: MismatchReason,
     },
 
     /// A cancellation notice was received.
@@ -1189,9 +1071,8 @@ pub(crate) enum TestEvent<'a> {
 
     /// The test run finished.
     RunFinished {
-        /// The unique ID for this run.
-        run_id: Uuid,
-
+        // /// The unique ID for this run.
+        // run_id: Uuid,
         /// The time at which the run was started.
         start_time: SystemTime,
 
@@ -1249,50 +1130,6 @@ impl Styles {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::{config::NextestConfig, platform::BuildPlatforms};
-
-//     #[test]
-//     fn no_capture_settings() {
-//         // Ensure that output settings are ignored with no-capture.
-//         let mut builder = TestReporterBuilder::default();
-//         builder
-//             .set_no_capture(true)
-//             .set_failure_output(TestOutputDisplay::Immediate)
-//             .set_success_output(TestOutputDisplay::Immediate)
-//             .set_status_level(StatusLevel::Fail);
-//         let test_list = TestList::empty();
-//         let config = NextestConfig::default_config("/fake/dir");
-//         let profile = config.profile(NextestConfig::DEFAULT_PROFILE).unwrap();
-//         let build_platforms = BuildPlatforms::new(None).unwrap();
-
-//         let mut buf: Vec<u8> = Vec::new();
-//         let output = ReporterStderr::Buffer(&mut buf);
-//         let reporter = builder.build(
-//             &test_list,
-//             &profile.apply_build_platforms(&build_platforms),
-//             output,
-//         );
-//         assert!(reporter.inner.no_capture, "no_capture is true");
-//         assert_eq!(
-//             reporter.inner.force_failure_output,
-//             Some(TestOutputDisplay::Never),
-//             "failure output is never, overriding other settings"
-//         );
-//         assert_eq!(
-//             reporter.inner.force_success_output,
-//             Some(TestOutputDisplay::Never),
-//             "success output is never, overriding other settings"
-//         );
-//         assert_eq!(
-//             reporter.inner.status_level,
-//             StatusLevel::Pass,
-//             "status level is pass, overriding other settings"
-//         );
-//     }
-// }
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ListStyles {
     pub(crate) binary_id: Style,

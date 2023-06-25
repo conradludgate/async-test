@@ -74,7 +74,6 @@ use std::{
     future::Future,
     hash::Hash,
     num::NonZeroUsize,
-    os::macos::raw::stat,
     pin::Pin,
     process,
     sync::{Arc, Mutex, OnceLock},
@@ -86,12 +85,11 @@ mod args;
 mod printer;
 
 use nextest::{
-    reporter::{ReporterStderr, TestEvent, TestReporter, TestReporterBuilder},
-    ExecuteStatus, RunStats, TestInstance, TestList,
+    reporter::{ReporterStderr, TestEvent, TestReporterBuilder},
+    ExecuteStatus, MismatchReason, RunStats, TestInstance, TestList,
 };
 use printer::Printer;
 use tokio::{sync::Semaphore, task::JoinSet};
-use uuid::Uuid;
 
 pub use crate::args::{Arguments, ColorSetting, FormatSetting};
 
@@ -404,32 +402,34 @@ impl Arguments {
         test.info.is_ignored && !self.ignored && !self.include_ignored
     }
 
-    fn is_filtered_out(&self, test: &Trial) -> bool {
+    fn is_filtered_out(&self, test: &Trial) -> Option<MismatchReason> {
         let test_name = &test.info.name;
 
         // If a filter was specified, apply this
-        if let Some(filter) = &self.filter {
-            match self.exact {
-                true if test_name != filter => return true,
-                false if !test_name.contains(filter) => return true,
-                _ => {}
-            };
+        let matches_filter = self.filter.iter().any(|filter| match self.exact {
+            true if test_name == filter => true,
+            false if test_name.contains(filter) => true,
+            _ => false,
+        });
+        if !self.filter.is_empty() && !matches_filter {
+            return Some(MismatchReason::String);
         }
 
         // If any skip pattern were specified, test for all patterns.
-        for skip_filter in &self.skip {
-            match self.exact {
-                true if test_name == skip_filter => return true,
-                false if test_name.contains(skip_filter) => return true,
-                _ => {}
-            }
+        let matches_skip = self.skip.iter().any(|skip_filter| match self.exact {
+            true if test_name == skip_filter => true,
+            false if test_name.contains(skip_filter) => true,
+            _ => false,
+        });
+        if matches_skip {
+            return Some(MismatchReason::String);
         }
 
         if self.ignored && !test.info.is_ignored {
-            return true;
+            return Some(MismatchReason::Ignored);
         }
 
-        false
+        None
     }
 }
 
@@ -458,8 +458,10 @@ pub fn run(args: &Arguments) -> Conclusion {
     // If `--list` is specified, just print the list and return.
     if args.list {
         let mut tests = tester.inner.lock().unwrap();
-        if args.filter.is_some() || !args.skip.is_empty() || args.ignored {
-            tests.tasks.retain(|test| !args.is_filtered_out(test));
+        if !args.filter.is_empty() || !args.skip.is_empty() || args.ignored {
+            tests
+                .tasks
+                .retain(|test| args.is_filtered_out(test).is_none());
         }
 
         let mut printer = printer::Printer::new(args, &tests.tasks);
@@ -474,9 +476,11 @@ pub fn run(args: &Arguments) -> Conclusion {
     let mut conclusion = Conclusion::empty();
 
     // Apply filtering
-    if args.filter.is_some() || !args.skip.is_empty() || args.ignored {
+    if !args.filter.is_empty() || !args.skip.is_empty() || args.ignored {
         let len_before = tests.tasks.len() as u64;
-        tests.tasks.retain(|test| !args.is_filtered_out(test));
+        tests
+            .tasks
+            .retain(|test| args.is_filtered_out(test).is_none());
         conclusion.num_filtered_out = len_before - tests.tasks.len() as u64;
     }
 
@@ -578,7 +582,6 @@ pub fn run(args: &Arguments) -> Conclusion {
 
 fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> Conclusion {
     let mut tests = tester.inner.lock().unwrap();
-    let run_id = Uuid::new_v4();
 
     let test_list = TestList {
         tests: tests.tasks.iter().map(|x| x.info.clone()).collect(),
@@ -623,12 +626,11 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         1 => runtime = tokio::runtime::Builder::new_current_thread(),
         num_threads => {
             runtime = tokio::runtime::Builder::new_multi_thread();
-            runtime.worker_threads(dbg!(num_threads - 1));
+            runtime.worker_threads(num_threads - 1);
         }
     };
 
-    runtime.enable_all();
-    let runtime = runtime.build().unwrap();
+    let runtime = runtime.enable_all().build().unwrap();
 
     let tasks = match args.test_tasks.and_then(NonZeroUsize::new) {
         Some(tasks) => tasks,
@@ -637,9 +639,7 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
 
     #[derive(Debug)]
     enum TestState {
-        Start {
-            info: TestInfo,
-        },
+        Start {},
         Done {
             start: SystemTime,
             outcome: Outcome,
@@ -663,34 +663,44 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         skipped: 0,
     };
 
-    // let mut active = HashSet::new();
+    let slow_period = Duration::from_secs(15);
+
     let semaphore = Arc::new(Semaphore::new(tasks.get()));
     let (tx, mut rx) = tokio::sync::mpsc::channel(tasks.get() * 4);
 
+    reporter
+        .report_event(TestEvent::RunStarted {
+            test_list: &test_list,
+        })
+        .unwrap();
+
     for test in tests.tasks.drain(..) {
-        if args.is_ignored(&test) {
+        if let Some(reason) = args.is_filtered_out(&test) {
+            reporter
+                .report_event(TestEvent::TestSkipped {
+                    test_instance: TestInstance {
+                        name: test.info.name,
+                    },
+                    reason,
+                })
+                .unwrap();
             stats.skipped += 1;
         } else {
             let tx = tx.clone();
             let semaphore = semaphore.clone();
-            let wait = Duration::from_secs(60);
             let test_task = async move {
                 let _permit = semaphore.acquire_owned().await.unwrap();
                 let start = SystemTime::now();
 
                 let mut test_task = std::pin::pin!(CatchUnwind((test.runner)().into()));
 
-                tx.send(TestState::Start {
-                    info: test.info.clone(),
-                })
-                .await
-                .unwrap();
+                tx.send(TestState::Start {}).await.unwrap();
                 for i in 1.. {
-                    let res = tokio::time::timeout(wait, test_task.as_mut()).await;
+                    let res = tokio::time::timeout(slow_period, test_task.as_mut()).await;
                     match res {
                         Err(_) => {
                             tx.send(TestState::Tick {
-                                elapsed: i * wait,
+                                elapsed: i * slow_period,
                                 info: test.info.clone(),
                             })
                             .await
@@ -717,13 +727,6 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
 
     drop(tx);
 
-    reporter
-        .report_event(TestEvent::RunStarted {
-            test_list: &test_list,
-            run_id,
-        })
-        .unwrap();
-
     let mut running = 0;
     runtime.block_on(async {
         loop {
@@ -731,11 +734,10 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
             let msg = rx.recv().await;
 
             match msg {
-                Some(TestState::Start { info }) => {
+                Some(TestState::Start {}) => {
                     running += 1;
                     reporter
                         .report_event(TestEvent::TestStarted {
-                            test_instance: TestInstance { name: info.name },
                             current_stats: stats,
                             running,
                             cancel_state: None,
@@ -759,35 +761,31 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
                     let status = match outcome {
                         Outcome::Passed => {
                             stats.passed += 1;
+                            stats.passed_slow += slow as usize;
                             stats.finished_count += 1;
-                            if slow {
-                                stats.passed_slow += 1;
-                            }
                             ExecuteStatus {
                                 output: None,
                                 result: nextest::ExecutionResult::Pass,
                                 start_time: start,
                                 time_taken: start.elapsed().unwrap(),
-                                is_slow: false,
+                                is_slow: slow,
                                 delay_before_start: Duration::ZERO,
                             }
                         }
                         Outcome::Failed(failed) => {
                             stats.failed += 1;
+                            stats.failed_slow += slow as usize;
                             stats.finished_count += 1;
-                            if slow {
-                                stats.failed_slow += 1;
-                            }
                             ExecuteStatus {
                                 output: Some(failed),
                                 result: nextest::ExecutionResult::Fail,
                                 start_time: start,
                                 time_taken: start.elapsed().unwrap(),
-                                is_slow: false,
+                                is_slow: slow,
                                 delay_before_start: Duration::ZERO,
                             }
                         }
-                        Outcome::Ignored => return,
+                        Outcome::Ignored => continue,
                     };
                     reporter
                         .report_event(TestEvent::TestFinished {
@@ -810,19 +808,11 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
 
     reporter
         .report_event(TestEvent::RunFinished {
-            run_id,
             start_time: start_instant,
             elapsed: start_instant.elapsed().unwrap(),
             run_stats: stats,
         })
         .unwrap();
-
-    // // Print failures if there were any, and the final summary.
-    // if !failed_tests.is_empty() {
-    //     printer.print_failures(&failed_tests);
-    // }
-
-    // printer.print_summary(&conclusion, start_instant.elapsed());
 
     conclusion
 }
@@ -847,12 +837,13 @@ impl Future for CatchUnwind {
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
         // don't log panics, catch and record them instead
+        let hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(|_info| {}));
         let res = catch_unwind(AssertUnwindSafe(|| self.0.as_mut().poll(cx)));
-        let _ = std::panic::take_hook();
+        std::panic::set_hook(hook);
 
-        res.map_or_else(
-            |e| {
+        match res {
+            Err(e) => {
                 // The `panic` information is just an `Any` object representing the
                 // value the panic was invoked with. For most panics (which use
                 // `panic!` like `println!`), this is either `&str` or `String`.
@@ -863,12 +854,10 @@ impl Future for CatchUnwind {
 
                 let msg = payload.unwrap_or("test panicked");
                 Poll::Ready(Outcome::Failed(msg.to_owned()))
-            },
-            |res| match res {
-                Poll::Ready(()) => Poll::Ready(Outcome::Passed),
-                Poll::Pending => Poll::Pending,
-            },
-        )
+            }
+            Ok(Poll::Ready(())) => Poll::Ready(Outcome::Passed),
+            Ok(Poll::Pending) => Poll::Pending,
+        }
     }
 }
 

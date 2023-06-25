@@ -207,3 +207,20 @@ impl<'a> ExecutionDescription<'a> {
         }
     }
 }
+
+/// The reason for why a test doesn't match a filter.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum MismatchReason {
+    /// This test does not match the run-ignored option in the filter.
+    Ignored,
+
+    /// This test does not match the provided string filters.
+    String,
+
+    /// This test does not match the provided expression filters.
+    Expression,
+
+    /// This test is in a different partition.
+    Partition,
+}

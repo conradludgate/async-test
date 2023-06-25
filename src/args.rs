@@ -133,11 +133,11 @@ pub struct Arguments {
     // ============== POSITIONAL VALUES =======================================
     /// Filter string. Only tests which contain this string are run.
     #[arg(
-        value_name = "FILTER",
-        help = "The FILTER string is tested against the name of all tests, and only those tests \
+        value_name = "FILTERS",
+        help = "The FILTERS strings are tested against the name of all tests, and only those tests \
                 whose names contain the filter are run."
     )]
-    pub filter: Option<String>,
+    pub filter: Vec<String>,
 }
 
 impl Arguments {
