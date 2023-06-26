@@ -3,8 +3,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-
-
 use crate::TestInfo;
 
 use self::reporter::{FinalStatusLevel, StatusLevel};

@@ -1161,10 +1161,8 @@ pub enum CancelReason {
 
     // /// An error occurred while reporting results.
     // ReportError,
-
     /// A termination signal (on Unix, SIGTERM or SIGHUP) was received.
     Signal,
-
     // /// An interrupt (on Unix, Ctrl-C) was received.
     // Interrupt,
 }

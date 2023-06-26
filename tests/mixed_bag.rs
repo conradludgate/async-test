@@ -43,20 +43,12 @@ async_test::tests!(
         tester.add(Trial::test("dog", || async {
             panic!("was not a good boy")
         }));
-        tester.add(Trial::test("fox", || async {}).with_kind("apple"));
-        tester.add(Trial::test("bunny", || async { panic!("jumped too high") }).with_kind("apple"));
+        tester.add(Trial::test("fox", || async {}));
+        tester.add(Trial::test("bunny", || async { panic!("jumped too high") }));
         tester.add(Trial::test("frog", || async {}).with_ignored_flag(true));
         tester.add(Trial::test("owl", || async { panic!("broke neck") }).with_ignored_flag(true));
-        tester.add(
-            Trial::test("fly", || async {})
-                .with_ignored_flag(true)
-                .with_kind("banana"),
-        );
-        tester.add(
-            Trial::test("bear", || async { panic!("no honey") })
-                .with_ignored_flag(true)
-                .with_kind("banana"),
-        );
+        tester.add(Trial::test("fly", || async {}).with_ignored_flag(true));
+        tester.add(Trial::test("bear", || async { panic!("no honey") }).with_ignored_flag(true));
     }
 );
 

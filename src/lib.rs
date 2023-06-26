@@ -72,10 +72,8 @@ use std::{
     any::TypeId,
     backtrace::{Backtrace, BacktraceStatus},
     cell::Cell,
-    collections::HashSet,
-    fmt,
+    collections::HashMap,
     future::Future,
-    hash::Hash,
     num::NonZeroUsize,
     pin::Pin,
     process,
@@ -95,54 +93,104 @@ use tokio::sync::Semaphore;
 
 pub use crate::args::{Arguments, ColorSetting, FormatSetting};
 
-/// A single test or benchmark.
+/// A single test.
 ///
 /// The original `libtest` often calls benchmarks "tests", which is a bit
 /// confusing. So in this library, it is called "trial".
 ///
-/// A trial is created via [`Trial::test`] or [`Trial::bench`]. The trial's
+/// A trial is created via [`Trial::test`]. The trial's
 /// `name` is printed and used for filtering. The `runner` is called when the
 /// test/benchmark is executed to determine its outcome. If `runner` panics,
 /// the trial is considered "failed". If you need the behavior of
 /// `#[should_panic]` you need to catch the panic yourself. You likely want to
 /// compare the panic payload to an expected value anyway.
 pub struct Trial {
-    runner: Box<dyn FnOnce() -> Box<dyn Future<Output = ()> + Send> + Send>,
+    runner: Box<dyn FnOnce(&'static Context) -> Box<dyn Future<Output = ()> + Send> + Send>,
+    requires: Vec<TypeId>,
     info: TestInfo,
 }
+
+pub trait TestFn<T>: Clone + Send + Sized + 'static {
+    fn call(self, context: &'static Context) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn requires(&self) -> Vec<TypeId>;
+}
+
+macro_rules! impl_handler {
+    (
+        [$($ty:ident),*]
+    ) => {
+        #[allow(non_snake_case, unused_mut)]
+        impl<F, Fut, $($ty,)*> TestFn<($($ty,)* ())> for F
+        where
+            F: FnOnce($(&'static $ty),*) -> Fut + Clone + Send + 'static,
+            Fut: Future<Output = ()> + Send,
+            $($ty: 'static + Sync + Send,)*
+        {
+            fn call(self, context: &'static Context) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+                Box::pin(async move {
+                    $(
+                        let $ty: &'static $ty = context.get().await.unwrap();
+                    )*
+
+                    self($($ty),*).await;
+                })
+            }
+            fn requires(&self) -> Vec<TypeId> {
+                vec![$(TypeId::of::<$ty>()),*]
+            }
+        }
+    };
+}
+
+impl<F, Fut> TestFn<((),)> for F
+where
+    F: FnOnce() -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = ()> + Send,
+{
+    fn call(self, context: &'static Context) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            self().await;
+        })
+    }
+    fn requires(&self) -> Vec<TypeId> {
+        vec![]
+    }
+}
+
+// impl_handler!([]);
+impl_handler!([T1]);
+impl_handler!([T1, T2]);
+impl_handler!([T1, T2, T3]);
+impl_handler!([T1, T2, T3, T4]);
+impl_handler!([T1, T2, T3, T4, T5]);
+impl_handler!([T1, T2, T3, T4, T5, T6]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7, T8]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7, T8, T9]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7, T8, T9, T10]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14]);
+impl_handler!([T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15]);
 
 impl Trial {
     /// Creates a (non-benchmark) test with the given name and runner.
     ///
     /// The runner returning `Ok(())` is interpreted as the test passing. If the
     /// runner returns `Err(_)`, the test is considered failed.
-    pub fn test<R, F>(name: impl Into<String>, runner: R) -> Self
+    pub fn test<T, F>(name: impl Into<String>, runner: F) -> Self
     where
-        R: FnOnce() -> F + Send + 'static,
-        F: Future<Output = ()> + Send + 'static,
+        T: 'static,
+        F: TestFn<T>,
     {
         Self {
-            runner: Box::new(move || Box::new(runner())),
+            requires: runner.requires(),
+            runner: Box::new(move |ctx| Box::new(runner.call(ctx))),
             info: TestInfo {
                 name: name.into(),
-                kind: String::new(),
                 is_ignored: false,
             },
-        }
-    }
-
-    /// Sets the "kind" of this test/benchmark. If this string is not
-    /// empty, it is printed in brackets before the test name (e.g.
-    /// `test [my-kind] test_name`). (Default: *empty*)
-    ///
-    /// This is the only extension to the original libtest.
-    pub fn with_kind(self, kind: impl Into<String>) -> Self {
-        Self {
-            info: TestInfo {
-                kind: kind.into(),
-                ..self.info
-            },
-            ..self
         }
     }
 
@@ -167,70 +215,55 @@ impl Trial {
         &self.info.name
     }
 
-    /// Returns the kind of this trial. If you have not set a kind, this is an
-    /// empty string.
-    pub fn kind(&self) -> &str {
-        &self.info.kind
-    }
-
     /// Returns whether this trial has been marked as *ignored*.
     pub fn has_ignored_flag(&self) -> bool {
         self.info.is_ignored
     }
 }
 
-impl fmt::Debug for Trial {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        struct OpaqueRunner;
-        impl fmt::Debug for OpaqueRunner {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("<runner>")
-            }
-        }
-
-        f.debug_struct("Test")
-            .field("runner", &OpaqueRunner)
-            .field("name", &self.info.name)
-            .field("kind", &self.info.kind)
-            .field("is_ignored", &self.info.is_ignored)
-            .finish()
-    }
-}
-
 // struct Config {}
 
 // type AnyOwnedVal = Box<dyn std::any::Any + Send + Sync + 'static>;
-// type AnySharedVal = Arc<dyn std::any::Any + Send + Sync + 'static>;
+type AnySharedVal = Arc<dyn std::any::Any + Send + Sync + 'static>;
 
 struct Setup {
-    type_id: fn() -> TypeId,
+    // type_id: fn() -> &'static TypeId,
     module: &'static str,
     // function: &'static str,
     // file: &'static str,
     // line: u32,
-    // setup: tokio::sync::Mutex<MaybeSetup>,
+    setup: fn() -> tokio::task::JoinHandle<AnySharedVal>,
+    value: tokio::sync::OnceCell<AnySharedVal>,
 }
+
+impl Context {
+    async fn get<T: 'static>(&self) -> Option<&T> {
+        let id = TypeId::of::<T>();
+        match self.values.get(&id) {
+            Some(s) => Some(s.get().await),
+            None => None,
+        }
+    }
+}
+
+impl Setup {
+    async fn get<T: 'static>(&self) -> &T {
+        self.value
+            .get_or_init(|| async { (self.setup)().await.unwrap() })
+            .await
+            .downcast_ref()
+            .unwrap()
+    }
+}
+
 struct SetupInit {
     type_id: fn() -> TypeId,
     module: &'static str,
     // function: &'static str,
     // file: &'static str,
     // line: u32,
-    // setup: MaybeSetupInit,
+    setup: fn() -> tokio::task::JoinHandle<AnySharedVal>,
 }
-
-impl Hash for Setup {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.type_id.hash(state);
-        self.module.hash(state);
-    }
-}
-impl PartialEq for Setup {
-    fn eq(&self, other: &Self) -> bool {
-        self.type_id == other.type_id && self.module == other.module
-    }
-}
-impl Eq for Setup {}
 
 // enum MaybeSetupInit {
 //     // /// should be called many times
@@ -239,12 +272,12 @@ impl Eq for Setup {}
 //     SharedInit(fn() -> tokio::task::JoinHandle<AnySharedVal>),
 // }
 // enum MaybeSetup {
-//     /// should be called many times
-//     Ephemeral(fn() -> tokio::task::JoinHandle<AnyOwnedVal>),
+//     // /// should be called many times
+//     // Ephemeral(fn() -> tokio::task::JoinHandle<AnyOwnedVal>),
 //     /// should be called once
 //     SharedInit(fn() -> tokio::task::JoinHandle<AnySharedVal>),
-//     /// called once and waiting
-//     Running(tokio::task::JoinHandle<AnySharedVal>),
+//     // /// called once and waiting
+//     // Running(tokio::task::JoinHandle<AnySharedVal>),
 //     /// done
 //     Done(AnySharedVal),
 // }
@@ -269,8 +302,8 @@ inventory::collect!(SetupInit);
 //     tokio::spawn(async { Arc::new(__inner().await) as Arc<_> })
 // }
 
-struct Context {
-    values: HashSet<Arc<Setup>>,
+pub struct Context {
+    values: HashMap<TypeId, Arc<Setup>>,
 }
 
 #[derive(Clone)]
@@ -300,20 +333,20 @@ mod builder {
 
 fn setup_tests() -> (Tester, Context) {
     let mut context = Context {
-        values: HashSet::new(),
+        values: HashMap::new(),
     };
     for setup in inventory::iter::<SetupInit>() {
-        context.values.insert(Arc::new(Setup {
-            type_id: setup.type_id,
-            module: setup.module,
-            // function: setup.function,
-            // file: setup.file,
-            // line: setup.line,
-            // setup: tokio::sync::Mutex::new(match setup.setup {
-            //     MaybeSetupInit::Ephemeral(f) => MaybeSetup::Ephemeral(f),
-            //     MaybeSetupInit::SharedInit(f) => MaybeSetup::SharedInit(f),
-            // }),
-        }));
+        context.values.insert(
+            (setup.type_id)(),
+            Arc::new(Setup {
+                module: setup.module,
+                // function: setup.function,
+                // file: setup.file,
+                // line: setup.line,
+                setup: setup.setup,
+                value: tokio::sync::OnceCell::new(),
+            }),
+        );
     }
     let tester = Tester {
         inner: Arc::new(Mutex::new(TesterInner { tasks: vec![] })),
@@ -327,7 +360,6 @@ fn setup_tests() -> (Tester, Context) {
 #[derive(Debug, Clone)]
 pub(crate) struct TestInfo {
     name: String,
-    kind: String,
     is_ignored: bool,
 }
 
@@ -449,7 +481,7 @@ pub fn main() {
 pub fn run(args: &Arguments) -> Conclusion {
     let start_instant = SystemTime::now();
 
-    let (tester, _context) = setup_tests();
+    let (tester, context) = setup_tests();
 
     // If `--list` is specified, just print the list and return.
     if args.list {
@@ -465,7 +497,7 @@ pub fn run(args: &Arguments) -> Conclusion {
         return Conclusion::empty();
     }
 
-    run_nextest(args, start_instant, tester)
+    run_nextest(args, start_instant, tester, context)
 }
 
 struct Location {
@@ -478,7 +510,13 @@ thread_local! {
     static BT: Cell<(Backtrace, Option<Location>)> = Cell::new((Backtrace::disabled(), None));
 }
 
-fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> Conclusion {
+fn run_nextest(
+    args: &Arguments,
+    start_instant: SystemTime,
+    tester: Tester,
+    context: Context,
+) -> Conclusion {
+    let context: &'static Context = Box::leak(Box::new(context));
     let mut tests = tester.inner.lock().unwrap();
 
     let test_list = TestList {
@@ -604,7 +642,7 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
                 let _permit = semaphore.acquire_owned().await.unwrap();
                 let start = SystemTime::now();
 
-                let mut test_task = std::pin::pin!(CatchUnwind((test.runner)().into()));
+                let mut test_task = std::pin::pin!(CatchUnwind((test.runner)(context).into()));
 
                 tx.send(TestState::Start {}).await.unwrap();
                 for i in 1.. {

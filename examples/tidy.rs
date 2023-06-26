@@ -27,8 +27,7 @@ async_test::tests!(
                             .to_string();
 
                         let test =
-                            Trial::test(name, move || async move { check_file(&path).await })
-                                .with_kind("tidy");
+                            Trial::test(name, move || async move { check_file(&path).await });
                         tester.add(test);
                     }
                 } else if file_type.is_dir() {

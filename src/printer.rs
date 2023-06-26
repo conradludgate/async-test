@@ -50,13 +50,7 @@ impl Printer {
                 continue;
             }
 
-            let kind = if test.info.kind.is_empty() {
-                String::new()
-            } else {
-                format!("[{}] ", test.info.kind)
-            };
-
-            writeln!(out, "{}{}: test", kind, test.info.name,)?;
+            writeln!(out, "{}: test", test.info.name)?;
         }
 
         Ok(())
