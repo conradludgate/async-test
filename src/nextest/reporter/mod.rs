@@ -338,6 +338,7 @@ impl<'a> TestReporter<'a> {
 
                 match &event {
                     TestEvent::RunStarted { .. } => {}
+                    TestEvent::SetupFinished { .. } => {}
                     TestEvent::TestFinished {
                         test_instance,
                         run_status,
@@ -657,6 +658,19 @@ impl<'a> TestReporterImpl {
                     ));
                 }
             }
+
+            TestEvent::SetupFinished {
+                test_instance,
+                duration,
+                ..
+            } => {
+                let describe = ExecutionDescription::Setup {
+                    duration: *duration,
+                };
+                if self.status_level >= describe.status_level() {
+                    self.write_status_line(test_instance, describe, writer)?;
+                }
+            }
             TestEvent::TestSkipped {
                 test_instance,
                 reason,
@@ -822,10 +836,14 @@ impl<'a> TestReporterImpl {
         describe: ExecutionDescription<'_>,
         writer: &mut impl Write,
     ) -> io::Result<()> {
-        let status = match describe {
+        let time_taken = match describe {
             ExecutionDescription::Success { status } => {
                 write!(writer, "{:>12} ", "PASS".style(self.styles.pass))?;
-                status
+                status.time_taken
+            }
+            ExecutionDescription::Setup { duration } => {
+                write!(writer, "{:>12} ", "TASK".style(self.styles.task))?;
+                duration
             }
             ExecutionDescription::Failure { status } => {
                 write!(
@@ -833,12 +851,12 @@ impl<'a> TestReporterImpl {
                     "{:>12} ",
                     status_str(status.result).style(self.styles.fail)
                 )?;
-                status
+                status.time_taken
             }
         };
 
         // Next, print the time taken.
-        self.write_duration(status.time_taken, writer)?;
+        self.write_duration(time_taken, writer)?;
 
         // Print the name of the test.
         self.write_instance(test_instance, writer)?;
@@ -853,29 +871,33 @@ impl<'a> TestReporterImpl {
         describe: ExecutionDescription<'_>,
         writer: &mut impl Write,
     ) -> io::Result<()> {
-        let status = match describe {
+        let time_taken = match describe {
             ExecutionDescription::Success { status } => match (status.is_slow, status.result) {
                 (true, _) => {
                     write!(writer, "{:>12} ", "SLOW".style(self.styles.skip))?;
-                    status
+                    status.time_taken
                 }
                 (false, _) => {
                     write!(writer, "{:>12} ", "PASS".style(self.styles.pass))?;
-                    status
+                    status.time_taken
                 }
             },
+            ExecutionDescription::Setup { duration } => {
+                write!(writer, "{:>12} ", "TASK".style(self.styles.task))?;
+                duration
+            }
             ExecutionDescription::Failure { status } => {
                 write!(
                     writer,
                     "{:>12} ",
                     status_str(status.result).style(self.styles.fail)
                 )?;
-                status
+                status.time_taken
             }
         };
 
         // Next, print the time taken.
-        self.write_duration(status.time_taken, writer)?;
+        self.write_duration(time_taken, writer)?;
 
         // Print the name of the test.
         self.write_instance(test_instance, writer)?;
@@ -1079,6 +1101,20 @@ pub(crate) enum TestEvent<'a> {
     },
 
     /// A test finished running.
+    SetupFinished {
+        /// The test instance that finished running.
+        test_instance: TestInstance,
+
+        duration: Duration,
+
+        /// Current statistics for number of tests so far.
+        current_stats: RunStats,
+
+        /// The number of tests that are currently running, excluding this one.
+        running: usize,
+    },
+
+    /// A test finished running.
     TestFinished {
         /// The test instance that finished running.
         test_instance: TestInstance,
@@ -1171,6 +1207,7 @@ pub enum CancelReason {
 struct Styles {
     is_colorized: bool,
     count: Style,
+    task: Style,
     pass: Style,
     retry: Style,
     fail: Style,
@@ -1186,6 +1223,7 @@ impl Styles {
         self.is_colorized = true;
         self.count = Style::new().bold();
         self.pass = Style::new().green().bold();
+        self.task = Style::new().cyan().bold();
         self.retry = Style::new().magenta().bold();
         self.fail = Style::new().red().bold();
         self.pass_output = Style::new().green();

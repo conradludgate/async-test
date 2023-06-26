@@ -114,6 +114,7 @@ impl<'cfg> MetadataJunit<'cfg> {
             | TestEvent::RunContinued { .. } => {}
             TestEvent::TestStarted { .. } => {}
             TestEvent::TestSlow { .. } => {}
+            TestEvent::SetupFinished { .. } => {}
             TestEvent::TestFinished {
                 test_instance,
                 run_status,

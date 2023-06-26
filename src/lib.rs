@@ -229,10 +229,11 @@ type AnySharedVal = Arc<dyn std::any::Any + Send + Sync>;
 struct Setup {
     // type_id: fn() -> &'static TypeId,
     module: &'static str,
-    // function: &'static str,
+    function: &'static str,
     // file: &'static str,
     // line: u32,
     setup: fn() -> tokio::task::JoinHandle<AnySharedVal>,
+    // init: AtomicUsize,
     value: tokio::sync::OnceCell<AnySharedVal>,
 }
 
@@ -253,13 +254,15 @@ impl Setup {
         // first  * removes outer ref -> Arc<T>
         // second * removes Arc       -> T
         // final  & makes a ref again -> &T
-        let x: &'static dyn std::any::Any = &**self
-            .value
-            .get_or_init(|| async { (self.setup)().await.unwrap() })
-            .await;
-
-        x.downcast_ref().unwrap()
+        let x: &'static dyn std::any::Any = &**self.value.get().expect("setup should be init");
+        x.downcast_ref().expect("type should be correct")
     }
+    // async fn load(&'static self) -> &AnySharedVal {
+    //     self.init.fetch_add(1, Ordering::AcqRel);
+    //     self.value
+    //         .get_or_init(|| async { (self.setup)().await.unwrap() })
+    //         .await
+    // }
 }
 
 pub struct Context {
@@ -307,14 +310,14 @@ mod builder {
 
     use crate::{AnySharedVal, Tester};
 
-    pub trait TestRequirement<T> {}
+    pub trait TestRequirementHasSetupFnFor<T> {}
 
     pub struct Setup<T>(PhantomData<T>);
 
     pub struct SetupInit {
         pub type_id: fn() -> TypeId,
         pub module: &'static str,
-        // function: &'static str,
+        pub function: &'static str,
         // file: &'static str,
         // line: u32,
         pub setup: fn() -> tokio::task::JoinHandle<AnySharedVal>,
@@ -325,9 +328,6 @@ mod builder {
     inventory::collect!(TestBuilder);
 }
 
-// inventory::submit! {TestBuilder(foo)}
-// fn foo(mut tester: Tester) {}
-
 fn setup_tests() -> (Vec<Trial>, &'static Context) {
     let mut context = Context {
         values: HashMap::new(),
@@ -337,7 +337,7 @@ fn setup_tests() -> (Vec<Trial>, &'static Context) {
             (setup.type_id)(),
             Arc::new(Setup {
                 module: setup.module,
-                // function: setup.function,
+                function: setup.function,
                 // file: setup.file,
                 // line: setup.line,
                 setup: setup.setup,
@@ -572,6 +572,11 @@ fn run_nextest(
     #[derive(Debug)]
     enum TestState {
         Start {},
+        StartSetup {},
+        DoneSetup {
+            name: String,
+            start: SystemTime,
+        },
         Done {
             start: SystemTime,
             outcome: Outcome,
@@ -630,10 +635,41 @@ fn run_nextest(
                 .unwrap();
             stats.skipped += 1;
         } else {
+            let req_len = test.requires.len() as u32;
+            let wg = Arc::new(Semaphore::new(req_len as usize));
+
+            for (requirement, id) in test.requires {
+                if let Some(s) = context.values.get(&id) {
+                    let tx = tx.clone();
+                    let permit = semaphore.clone().acquire_owned();
+                    let wg_permit = wg.clone().try_acquire_owned().unwrap();
+                    runtime.spawn(async move {
+                        let _wg_permit = wg_permit;
+                        s.value
+                            .get_or_init(move || async move {
+                                let _permit = permit.await.unwrap();
+                                let start = SystemTime::now();
+
+                                tx.send(TestState::StartSetup {}).await.unwrap();
+                                let res = (s.setup)().await.unwrap();
+                                tx.send(TestState::DoneSetup {
+                                    name: s.function.to_owned(),
+                                    start,
+                                })
+                                .await
+                                .unwrap();
+                                res
+                            })
+                            .await;
+                    });
+                }
+            }
+
             let tx = tx.clone();
-            let semaphore = semaphore.clone();
+            let permit = semaphore.clone().acquire_owned();
             let test_task = async move {
-                let _permit = semaphore.acquire_owned().await.unwrap();
+                let _wg_permit = wg.acquire_many_owned(req_len).await.unwrap();
+                let _permit = permit.await.unwrap();
                 let start = SystemTime::now();
 
                 let mut test_task = std::pin::pin!(CatchUnwind((test.runner)(context).into()));
@@ -677,6 +713,17 @@ fn run_nextest(
             let msg = rx.recv().await;
 
             match msg {
+                Some(TestState::StartSetup {}) => {}
+                Some(TestState::DoneSetup { name, start }) => {
+                    reporter
+                        .report_event(TestEvent::SetupFinished {
+                            test_instance: TestInstance { name },
+                            duration: start.elapsed().unwrap(),
+                            current_stats: stats,
+                            running,
+                        })
+                        .unwrap();
+                }
                 Some(TestState::Start {}) => {
                     running += 1;
                     reporter
@@ -820,7 +867,7 @@ macro_rules! test {
     ($vis:vis async fn $name:ident($($arg:ident: $arg_ty:ty),* $(,)?) $body:block) => {
         $vis async fn $name($($arg: $arg_ty),*) {
             {
-                $($crate::__sus::has_setup_fn::<_, $arg_ty>();)*
+                // $($crate::__sus::has_setup_fn::<_, $arg_ty>();)*
                 $crate::__sus::inventory::submit! {
                     $crate::__sus::TestBuilder(
                         |tester: $crate::Tester| tester.add($crate::Trial::test(stringify!($name), $name))
@@ -856,9 +903,9 @@ macro_rules! setup {
         $vis struct $name {}
         #[doc(hidden)]
         const _: () = {
-            use $crate::__sus::{TestRequirement, Setup};
+            use $crate::__sus::{TestRequirementHasSetupFnFor, Setup};
 
-            impl TestRequirement<$name> for Setup<&$setup> {}
+            impl TestRequirementHasSetupFnFor<&$setup> for Setup<$name> {}
         };
         $(#[$meta])* $vis async fn $name() -> $setup {
             {
@@ -866,6 +913,7 @@ macro_rules! setup {
                     $crate::__sus::SetupInit{
                         type_id: $crate::__sus::TypeId::of::<$setup>,
                         module: $crate::__sus::module_path!(),
+                        function: stringify!($name),
                         setup: || $crate::__sus::spawn(async {
                             let x: $setup = $name().await;
                             $crate::__sus::Arc::new(x) as $crate::__sus::Arc<_>
@@ -884,7 +932,7 @@ macro_rules! setup {
 pub mod __sus {
     pub use crate::builder::SetupInit;
     pub use crate::builder::TestBuilder;
-    pub use crate::builder::{Setup, TestRequirement};
+    pub use crate::builder::{Setup, TestRequirementHasSetupFnFor};
     pub use inventory;
     pub use std::sync::Arc;
     pub use std::{any::TypeId, module_path};
@@ -892,7 +940,7 @@ pub mod __sus {
 
     pub fn has_setup_fn<T, S>()
     where
-        Setup<S>: TestRequirement<T>,
+        Setup<T>: TestRequirementHasSetupFnFor<S>,
     {
     }
 }

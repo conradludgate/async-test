@@ -90,6 +90,8 @@ pub enum ExecutionDescription<'a> {
         /// The status of the test.
         status: &'a ExecuteStatus,
     },
+    /// The test was run once and was successful.
+    Setup { duration: Duration },
 
     /// The test was run once, or possibly multiple times. All runs failed.
     Failure { status: &'a ExecuteStatus },
@@ -107,6 +109,7 @@ impl<'a> ExecutionDescription<'a> {
                     FinalStatusLevel::Pass
                 }
             }
+            ExecutionDescription::Setup { .. } => FinalStatusLevel::Pass,
             // A flaky test implies that we print out retry information for it.
             ExecutionDescription::Failure { .. } => FinalStatusLevel::Fail,
         }
@@ -200,7 +203,9 @@ impl<'a> ExecutionDescription<'a> {
     /// Returns the status level for this `ExecutionDescription`.
     pub fn status_level(&self) -> StatusLevel {
         match self {
-            ExecutionDescription::Success { .. } => StatusLevel::Pass,
+            ExecutionDescription::Success { .. } | ExecutionDescription::Setup { .. } => {
+                StatusLevel::Pass
+            }
             ExecutionDescription::Failure { .. } => StatusLevel::Fail,
         }
     }
