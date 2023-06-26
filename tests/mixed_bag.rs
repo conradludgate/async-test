@@ -66,10 +66,9 @@ fn normal() {
         args([]),
         8,
         Conclusion {
-            num_filtered_out: 0,
+            num_filtered_out: 4,
             num_passed: 2,
             num_failed: 2,
-            num_ignored: 4,
         },
         "
             test          cat   ... ok
@@ -103,10 +102,9 @@ fn test_mode() {
         args(["--nextest"]),
         8,
         Conclusion {
-            num_filtered_out: 0,
+            num_filtered_out: 4,
             num_passed: 2,
             num_failed: 2,
-            num_ignored: 4,
         },
         "
             test          cat   ... ok
@@ -156,7 +154,6 @@ fn list() {
             num_filtered_out: 0,
             num_passed: 0,
             num_failed: 0,
-            num_ignored: 0,
         }
     );
 }
@@ -179,7 +176,6 @@ fn list_ignored() {
             num_filtered_out: 0,
             num_passed: 0,
             num_failed: 0,
-            num_ignored: 0,
         }
     );
 }
@@ -200,7 +196,6 @@ fn list_with_filter() {
             num_filtered_out: 0,
             num_passed: 0,
             num_failed: 0,
-            num_ignored: 0,
         }
     );
 }
@@ -214,7 +209,6 @@ fn filter_c() {
             num_filtered_out: 7,
             num_passed: 1,
             num_failed: 0,
-            num_ignored: 0,
         },
         "
             test cat ... ok
@@ -228,10 +222,9 @@ fn filter_o_test() {
         args(["--test", "o"]),
         4,
         Conclusion {
-            num_filtered_out: 4,
+            num_filtered_out: 6,
             num_passed: 1,
             num_failed: 1,
-            num_ignored: 2,
         },
         "
             test         dog  ... FAILED
@@ -260,7 +253,6 @@ fn filter_o_test_include_ignored() {
             num_filtered_out: 4,
             num_passed: 2,
             num_failed: 2,
-            num_ignored: 0,
         },
         "
             test         dog  ... FAILED
@@ -293,7 +285,6 @@ fn filter_o_test_ignored() {
             num_filtered_out: 6,
             num_passed: 1,
             num_failed: 1,
-            num_ignored: 0,
         },
         "
             test frog ... ok
@@ -320,7 +311,6 @@ fn normal_include_ignored() {
             num_filtered_out: 0,
             num_passed: 4,
             num_failed: 4,
-            num_ignored: 0,
         },
         "
             test          cat   ... ok
@@ -365,7 +355,6 @@ fn normal_ignored() {
             num_filtered_out: 4,
             num_passed: 2,
             num_failed: 2,
-            num_ignored: 0,
         },
         "
             test          frog ... ok
@@ -398,7 +387,6 @@ fn lots_of_flags() {
             num_filtered_out: 6,
             num_passed: 1,
             num_failed: 1,
-            num_ignored: 0,
         },
         "
             test [apple] fox ... ok
@@ -422,10 +410,9 @@ fn terse_output() {
     assert_eq!(
         c,
         Conclusion {
-            num_filtered_out: 0,
+            num_filtered_out: 4,
             num_passed: 2,
             num_failed: 2,
-            num_ignored: 4,
         }
     );
     assert_log!(

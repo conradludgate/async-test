@@ -23,7 +23,6 @@ fn normal() {
             num_filtered_out: 0,
             num_passed: 1,
             num_failed: 1,
-            num_ignored: 0,
         },
         "
             test passes ... ok

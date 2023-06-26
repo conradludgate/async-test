@@ -10,16 +10,16 @@ fn main() {
 // Tests
 
 async_test::test!(
-    async fn check_toph() {}
+    async fn check_foo() {}
 );
 
 async_test::test!(
-    async fn check_katara() {}
+    async fn check_bar() {}
 );
 
 async_test::test!(
-    async fn check_sokka() {
-        panic!("Sokka tripped and fell :(")
+    async fn check_panic() {
+        panic!("Ripperonis")
     }
 );
 
@@ -33,7 +33,6 @@ async_test::tests!(
         }
 
         tester.add(Trial::test("long_computation", long_computation).with_ignored_flag(true));
-        tester.add(Trial::test("foo", compile_fail_dummy).with_kind("compile-fail"));
     }
 );
 
@@ -43,5 +42,3 @@ async fn long_computation() {
 async fn short_computation() {
     tokio::time::sleep(time::Duration::from_millis(200)).await;
 }
-
-async fn compile_fail_dummy() {}

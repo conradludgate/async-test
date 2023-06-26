@@ -64,11 +64,14 @@
 //! - `--format=json|junit`
 
 #![forbid(unsafe_code)]
+#![allow(clippy::all, unused_variables, dead_code)]
 
 mod nextest;
 
 use std::{
     any::TypeId,
+    backtrace::{Backtrace, BacktraceStatus},
+    cell::Cell,
     collections::HashSet,
     fmt,
     future::Future,
@@ -85,11 +88,10 @@ mod args;
 mod printer;
 
 use nextest::{
-    reporter::{ReporterStderr, TestEvent, TestReporterBuilder},
+    reporter::{ReporterOutput, TestEvent, TestReporterBuilder},
     ExecuteStatus, MismatchReason, RunStats, TestInstance, TestList,
 };
-use printer::Printer;
-use tokio::{sync::Semaphore, task::JoinSet};
+use tokio::sync::Semaphore;
 
 pub use crate::args::{Arguments, ColorSetting, FormatSetting};
 
@@ -337,9 +339,6 @@ enum Outcome {
 
     /// The test failed.
     Failed(String),
-
-    /// The test was ignored.
-    Ignored,
 }
 
 /// Contains information about the entire test run. Is returned by [`run`].
@@ -353,16 +352,13 @@ enum Outcome {
 pub struct Conclusion {
     /// Number of tests and benchmarks that were filtered out (either by the
     /// filter-in pattern or by `--skip` arguments).
-    pub num_filtered_out: u64,
+    pub num_filtered_out: usize,
 
     /// Number of passed tests.
-    pub num_passed: u64,
+    pub num_passed: usize,
 
     /// Number of failed tests and benchmarks.
-    pub num_failed: u64,
-
-    /// Number of ignored tests and benchmarks.
-    pub num_ignored: u64,
+    pub num_failed: usize,
 }
 
 impl Conclusion {
@@ -391,7 +387,6 @@ impl Conclusion {
             num_filtered_out: 0,
             num_passed: 0,
             num_failed: 0,
-            num_ignored: 0,
         }
     }
 }
@@ -425,7 +420,7 @@ impl Arguments {
             return Some(MismatchReason::String);
         }
 
-        if self.ignored && !test.info.is_ignored {
+        if self.ignored ^ test.info.is_ignored {
             return Some(MismatchReason::Ignored);
         }
 
@@ -439,7 +434,8 @@ impl Arguments {
 /// the testing harness. It does all the printing and house keeping.
 pub fn main() {
     let args = Arguments::from_args();
-    run(&args).exit_if_failed();
+    let c = run(&args);
+    c.exit_if_failed();
 }
 
 /// Runs all given tests.
@@ -464,120 +460,22 @@ pub fn run(args: &Arguments) -> Conclusion {
                 .retain(|test| args.is_filtered_out(test).is_none());
         }
 
-        let mut printer = printer::Printer::new(args, &tests.tasks);
-        printer.print_list(&tests.tasks, args.ignored);
-        return Conclusion::empty();
-    }
-    if args.nextest {
-        return run_nextest(args, start_instant, tester);
-    }
-
-    let mut tests = tester.inner.lock().unwrap();
-    let mut conclusion = Conclusion::empty();
-
-    // Apply filtering
-    if !args.filter.is_empty() || !args.skip.is_empty() || args.ignored {
-        let len_before = tests.tasks.len() as u64;
-        tests
-            .tasks
-            .retain(|test| args.is_filtered_out(test).is_none());
-        conclusion.num_filtered_out = len_before - tests.tasks.len() as u64;
-    }
-
-    // Create printer which is used for all output.
-    let mut printer = printer::Printer::new(args, &tests.tasks);
-
-    // If `--list` is specified, just print the list and return.
-    if args.list {
+        let mut printer = printer::Printer::new(args);
         printer.print_list(&tests.tasks, args.ignored);
         return Conclusion::empty();
     }
 
-    // Print number of tests
-    printer.print_title(tests.tasks.len() as u64);
+    run_nextest(args, start_instant, tester)
+}
 
-    let mut failed_tests = Vec::new();
-    let mut handle_outcome = |outcome: Outcome, test: TestInfo, printer: &mut Printer| {
-        printer.print_single_outcome(&outcome);
+struct Location {
+    file: String,
+    line: u32,
+    column: u32,
+}
 
-        // Handle outcome
-        match outcome {
-            Outcome::Passed => conclusion.num_passed += 1,
-            Outcome::Failed(failed) => {
-                failed_tests.push((test, failed));
-                conclusion.num_failed += 1;
-            }
-            Outcome::Ignored => conclusion.num_ignored += 1,
-        }
-    };
-
-    let mut set = JoinSet::new();
-
-    let threads = match args.test_threads.and_then(NonZeroUsize::new) {
-        None => std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap()),
-        Some(num_threads) => num_threads,
-    };
-
-    let mut runtime;
-
-    match threads.get() {
-        1 => runtime = tokio::runtime::Builder::new_current_thread(),
-        num_threads => {
-            runtime = tokio::runtime::Builder::new_multi_thread();
-            runtime.worker_threads(num_threads - 1);
-        }
-    };
-
-    runtime.enable_all();
-    let runtime = runtime.build().unwrap();
-
-    let tasks = match args.test_tasks.and_then(NonZeroUsize::new) {
-        Some(tasks) => tasks,
-        None => threads,
-    };
-
-    for test in tests.tasks.drain(..) {
-        if set.len() >= tasks.get() {
-            let (outcome, test_info, _) = runtime
-                .block_on(set.join_next())
-                .expect("join set should contain at least 1 test")
-                .expect("all test panics should be caught");
-
-            if tasks.get() > 1 {
-                printer.print_test(&test_info);
-            }
-            handle_outcome(outcome, test_info, &mut printer);
-        }
-        if args.is_ignored(&test) {
-            printer.print_test(&test.info);
-            handle_outcome(Outcome::Ignored, test.info, &mut printer);
-        } else {
-            // In multithreaded mode, we do only print the start of the line
-            // after the test ran, as otherwise it would lead to terribly
-            // interleaved output.
-            if tasks.get() == 1 {
-                printer.print_test(&test.info);
-            }
-            set.spawn_on(run_single(test.runner, test.info), runtime.handle());
-        }
-    }
-
-    while let Some(res) = runtime.block_on(set.join_next()) {
-        let (outcome, test_info, _) = res.expect("all test panics should be caught");
-        if tasks.get() > 1 {
-            printer.print_test(&test_info);
-        }
-        handle_outcome(outcome, test_info, &mut printer);
-    }
-
-    // Print failures if there were any, and the final summary.
-    if !failed_tests.is_empty() {
-        printer.print_failures(&failed_tests);
-    }
-
-    printer.print_summary(&conclusion, start_instant.elapsed().unwrap());
-
-    conclusion
+thread_local! {
+    static BT: Cell<(Backtrace, Option<Location>)> = Cell::new((Backtrace::disabled(), None));
 }
 
 fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> Conclusion {
@@ -593,11 +491,13 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         .as_deref()
         .map(|f| std::fs::File::create(f).unwrap());
     let report_output = match &mut output {
-        Some(file) => ReporterStderr::Buffer(file),
-        None => ReporterStderr::Terminal,
+        Some(file) => ReporterOutput::Buffer(file),
+        None => ReporterOutput::Stderr,
     };
 
-    let mut reporter = TestReporterBuilder::default().build(&test_list, report_output);
+    let mut reporter = TestReporterBuilder::default()
+        .set_imitate_cargo(args.exact)
+        .build(&test_list, report_output);
 
     match args.color.unwrap_or(ColorSetting::Auto) {
         ColorSetting::Auto => match args.logfile.is_some() {
@@ -667,6 +567,18 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
 
     let semaphore = Arc::new(Semaphore::new(tasks.get()));
     let (tx, mut rx) = tokio::sync::mpsc::channel(tasks.get() * 4);
+
+    // don't log panics, catch and record them instead
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let bt = std::backtrace::Backtrace::capture();
+        let location = info.location().map(|loc| Location {
+            file: loc.file().to_owned(),
+            line: loc.line(),
+            column: loc.column(),
+        });
+        BT.with(|x| x.set((bt, location)));
+    }));
 
     reporter
         .report_event(TestEvent::RunStarted {
@@ -785,7 +697,6 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
                                 delay_before_start: Duration::ZERO,
                             }
                         }
-                        Outcome::Ignored => continue,
                     };
                     reporter
                         .report_event(TestEvent::TestFinished {
@@ -806,6 +717,8 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         }
     });
 
+    std::panic::set_hook(hook);
+
     reporter
         .report_event(TestEvent::RunFinished {
             start_time: start_instant,
@@ -814,19 +727,11 @@ fn run_nextest(args: &Arguments, start_instant: SystemTime, tester: Tester) -> C
         })
         .unwrap();
 
-    conclusion
-}
-
-/// Runs the given runner, catching any panics and treating them as a failed test.
-async fn run_single(
-    runner: Box<dyn FnOnce() -> Box<dyn Future<Output = ()> + Send> + Send>,
-    info: TestInfo,
-) -> (Outcome, TestInfo, SystemTime) {
-    let start = SystemTime::now();
-
-    let res = CatchUnwind(runner().into()).await;
-
-    (res, info, start)
+    Conclusion {
+        num_filtered_out: stats.skipped,
+        num_passed: stats.passed,
+        num_failed: stats.failed,
+    }
 }
 
 struct CatchUnwind(Pin<Box<dyn Future<Output = ()> + Send>>);
@@ -836,11 +741,7 @@ impl Future for CatchUnwind {
     fn poll(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
         use std::panic::{catch_unwind, AssertUnwindSafe};
 
-        // don't log panics, catch and record them instead
-        let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_info| {}));
         let res = catch_unwind(AssertUnwindSafe(|| self.0.as_mut().poll(cx)));
-        std::panic::set_hook(hook);
 
         match res {
             Err(e) => {
@@ -853,7 +754,29 @@ impl Future for CatchUnwind {
                     .or(e.downcast_ref::<&str>().copied());
 
                 let msg = payload.unwrap_or("test panicked");
-                Poll::Ready(Outcome::Failed(msg.to_owned()))
+
+                let (bt, location) = BT.with(|x| x.replace((Backtrace::disabled(), None)));
+                // dbg!(location);
+
+                let mut final_msg = format!("thread 'main' panicked at '{msg}'");
+                if let Some(Location { file, line, column }) = location {
+                    final_msg += &format!(", {file}:{line}:{column}");
+                }
+                if bt.status() == BacktraceStatus::Captured {
+                    let bt = bt.to_string();
+                    if let Some(unwind) = bt.find("rust_begin_unwind") {
+                        if let Some(catch) = bt[unwind..].find("async_test::CatchUnwind") {
+                            let unwind_start = bt[..unwind].rfind('\n').unwrap_or(0);
+                            let catch_start = bt[..unwind + catch].rfind('\n').unwrap();
+                            final_msg += &format!(
+                                "\nstack backtrace:\n{}",
+                                bt[unwind_start..catch_start].trim_start_matches('\n')
+                            );
+                        }
+                    }
+                }
+
+                Poll::Ready(Outcome::Failed(final_msg))
             }
             Ok(Poll::Ready(())) => Poll::Ready(Outcome::Passed),
             Ok(Poll::Pending) => Poll::Pending,

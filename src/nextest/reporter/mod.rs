@@ -34,7 +34,8 @@ use std::{
 use self::aggregator::{EventAggregator, WriteEventError};
 
 use super::{
-    ExecuteStatus, ExecutionDescription, ExecutionResult, RunStats, TestInstance, TestList, MismatchReason,
+    ExecuteStatus, ExecutionDescription, ExecutionResult, MismatchReason, RunStats, TestInstance,
+    TestList,
 };
 
 /// When to display test output in the reporter.
@@ -105,8 +106,7 @@ pub enum StatusLevel {
 ///
 /// Status levels are incremental.
 ///
-/// This differs from [`StatusLevel`] in two ways:
-/// * It has a "flaky" test indicator that's different from "retry" (though "retry" works as an alias.)
+/// This differs from [`StatusLevel`] in one ways:
 /// * It has a different ordering: skipped tests are prioritized over passing ones.
 #[derive(Copy, Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -134,11 +134,11 @@ pub enum FinalStatusLevel {
 /// Standard error destination for the reporter.
 ///
 /// This is usually a terminal, but can be an in-memory buffer for tests.
-pub enum ReporterStderr<'a> {
+pub enum ReporterOutput<'a> {
     /// Produce output on the (possibly piped) terminal.
     ///
     /// If the terminal isn't piped, produce output to a progress bar.
-    Terminal,
+    Stderr,
 
     /// Write output to a buffer.
     Buffer(&'a mut dyn io::Write),
@@ -151,45 +151,52 @@ pub struct TestReporterBuilder {
     success_output: Option<TestOutputDisplay>,
     status_level: Option<StatusLevel>,
     final_status_level: Option<FinalStatusLevel>,
-    verbose: bool,
+    // verbose: bool,
     hide_progress_bar: bool,
+    imitate_cargo: bool,
 }
 
 impl TestReporterBuilder {
-    /// Sets the conditions under which test failures are output.
-    pub fn set_failure_output(&mut self, failure_output: TestOutputDisplay) -> &mut Self {
-        self.failure_output = Some(failure_output);
-        self
-    }
+    // /// Sets the conditions under which test failures are output.
+    // pub fn set_failure_output(&mut self, failure_output: TestOutputDisplay) -> &mut Self {
+    //     self.failure_output = Some(failure_output);
+    //     self
+    // }
 
-    /// Sets the conditions under which test successes are output.
-    pub fn set_success_output(&mut self, success_output: TestOutputDisplay) -> &mut Self {
-        self.success_output = Some(success_output);
-        self
-    }
+    // /// Sets the conditions under which test successes are output.
+    // pub fn set_success_output(&mut self, success_output: TestOutputDisplay) -> &mut Self {
+    //     self.success_output = Some(success_output);
+    //     self
+    // }
 
-    /// Sets the kinds of statuses to output.
-    pub fn set_status_level(&mut self, status_level: StatusLevel) -> &mut Self {
-        self.status_level = Some(status_level);
-        self
-    }
+    // /// Sets the kinds of statuses to output.
+    // pub fn set_status_level(&mut self, status_level: StatusLevel) -> &mut Self {
+    //     self.status_level = Some(status_level);
+    //     self
+    // }
 
-    /// Sets the kinds of statuses to output at the end of the run.
-    pub fn set_final_status_level(&mut self, final_status_level: FinalStatusLevel) -> &mut Self {
-        self.final_status_level = Some(final_status_level);
-        self
-    }
+    // /// Sets the kinds of statuses to output at the end of the run.
+    // pub fn set_final_status_level(&mut self, final_status_level: FinalStatusLevel) -> &mut Self {
+    //     self.final_status_level = Some(final_status_level);
+    //     self
+    // }
 
-    /// Sets verbose output.
-    pub fn set_verbose(&mut self, verbose: bool) -> &mut Self {
-        self.verbose = verbose;
-        self
-    }
+    // /// Sets verbose output.
+    // pub fn set_verbose(&mut self, verbose: bool) -> &mut Self {
+    //     self.verbose = verbose;
+    //     self
+    // }
 
-    /// Sets visibility of the progress bar.
-    /// The progress bar is also hidden if `no_capture` is set.
-    pub fn set_hide_progress_bar(&mut self, hide_progress_bar: bool) -> &mut Self {
-        self.hide_progress_bar = hide_progress_bar;
+    // /// Sets visibility of the progress bar.
+    // /// The progress bar is also hidden if `no_capture` is set.
+    // pub fn set_hide_progress_bar(&mut self, hide_progress_bar: bool) -> &mut Self {
+    //     self.hide_progress_bar = hide_progress_bar;
+    //     self
+    // }
+
+    /// Whether to imitiate the cargo test output for other tools
+    pub fn set_imitate_cargo(&mut self, imitate_cargo: bool) -> &mut Self {
+        self.imitate_cargo = imitate_cargo;
         self
     }
 }
@@ -199,7 +206,7 @@ impl TestReporterBuilder {
     pub(crate) fn build<'a>(
         &self,
         test_list: &TestList,
-        output: ReporterStderr<'a>,
+        output: ReporterOutput<'a>,
     ) -> TestReporter<'a> {
         let styles = Box::default();
         let aggregator = EventAggregator::new();
@@ -216,11 +223,12 @@ impl TestReporterBuilder {
             //     // in these environments.
             //     ReporterStderrImpl::TerminalWithoutBar
             // }
-            ReporterStderr::Terminal if self.hide_progress_bar => {
-                ReporterStderrImpl::TerminalWithoutBar
+            ReporterOutput::Stderr if self.hide_progress_bar => {
+                ReporterStderrImpl::StderrWithoutBar
             }
+            ReporterOutput::Stderr if self.imitate_cargo => ReporterStderrImpl::ImitateCargo,
 
-            ReporterStderr::Terminal => {
+            ReporterOutput::Stderr => {
                 let progress_bar = ProgressBar::new(test_list.tests.len() as u64);
                 // Emulate Cargo's style.
                 let test_count_width = format!("{}", test_list.tests.len()).len();
@@ -248,9 +256,9 @@ impl TestReporterBuilder {
                 progress_bar.set_draw_target(ProgressDrawTarget::stderr_with_hz(20));
                 // Enable a steady tick 10 times a second.
                 progress_bar.enable_steady_tick(Duration::from_millis(100));
-                ReporterStderrImpl::TerminalWithBar(progress_bar)
+                ReporterStderrImpl::StderrWithBar(progress_bar)
             }
-            ReporterStderr::Buffer(buf) => ReporterStderrImpl::Buffer(buf),
+            ReporterOutput::Buffer(buf) => ReporterStderrImpl::Buffer(buf),
         };
 
         TestReporter {
@@ -270,8 +278,9 @@ impl TestReporterBuilder {
 }
 
 enum ReporterStderrImpl<'a> {
-    TerminalWithBar(ProgressBar),
-    TerminalWithoutBar,
+    StderrWithBar(ProgressBar),
+    StderrWithoutBar,
+    ImitateCargo,
     Buffer(&'a mut dyn std::io::Write),
 }
 
@@ -300,7 +309,7 @@ impl<'a> TestReporter<'a> {
     /// Report this test event to the given writer.
     fn write_event(&mut self, event: TestEvent<'a>) -> Result<(), WriteEventError> {
         match &mut self.stderr {
-            ReporterStderrImpl::TerminalWithBar(progress_bar) => {
+            ReporterStderrImpl::StderrWithBar(progress_bar) => {
                 // Write to a string that will be printed as a log line.
                 let mut buf: Vec<u8> = Vec::new();
                 self.inner
@@ -314,13 +323,94 @@ impl<'a> TestReporter<'a> {
 
                 update_progress_bar(&event, &self.inner.styles, progress_bar);
             }
-            ReporterStderrImpl::TerminalWithoutBar => {
+            ReporterStderrImpl::StderrWithoutBar => {
                 // Write to a buffered stderr.
                 let mut writer = BufWriter::new(std::io::stderr());
                 self.inner
                     .write_event_impl(&event, &mut writer)
                     .map_err(WriteEventError::Io)?;
                 writer.flush().map_err(WriteEventError::Io)?;
+            }
+            ReporterStderrImpl::ImitateCargo => {
+                // Write to a buffered stderr.
+                let mut stderr = BufWriter::new(std::io::stderr());
+                let mut stdout = BufWriter::new(std::io::stdout());
+
+                match &event {
+                    TestEvent::RunStarted { .. } => {}
+                    TestEvent::TestFinished {
+                        test_instance,
+                        run_status,
+                        ..
+                    } => {
+                        if run_status.result != ExecutionResult::Pass {
+                            self.inner.final_outputs.push((
+                                test_instance.clone(),
+                                FinalOutput::Executed {
+                                    run_status: run_status.clone(),
+                                    test_output_display: TestOutputDisplay::Final,
+                                },
+                            ))
+                        }
+                        let s = match run_status.result == ExecutionResult::Pass {
+                            true => "ok",
+                            false => "FAILED",
+                        };
+                        writeln!(stdout, "test {} ... {s}", test_instance.name,)
+                            .map_err(WriteEventError::Io)?;
+                    }
+                    TestEvent::RunFinished {
+                        elapsed, run_stats, ..
+                    } => {
+                        if !self.inner.final_outputs.is_empty() {
+                            writeln!(stdout, "\nfailures:").map_err(WriteEventError::Io)?;
+                            stdout.flush().map_err(WriteEventError::Io)?;
+
+                            for (instance, output) in self.inner.final_outputs.iter() {
+                                if let FinalOutput::Executed {
+                                    run_status:
+                                        ExecuteStatus {
+                                            output: Some(msg), ..
+                                        },
+                                    ..
+                                } = output
+                                {
+                                    // writeln!(stderr, "---- {} stdout ----", instance.name)
+                                    //     .map_err(WriteEventError::Io)?;
+                                    writeln!(stderr, "{msg}\n").map_err(WriteEventError::Io)?;
+                                    stderr.flush().map_err(WriteEventError::Io)?;
+                                }
+                            }
+
+                            writeln!(stdout, "\nfailures:").map_err(WriteEventError::Io)?;
+                            for (instance, _) in self.inner.final_outputs.iter() {
+                                writeln!(stdout, "    {}", instance.name)
+                                    .map_err(WriteEventError::Io)?;
+                            }
+                        }
+
+                        // let s = match !run_stats.any_failed() {
+                        //     true => "ok",
+                        //     false => "FAILED",
+                        // };
+                        // writeln!(stdout, "\ntest result: {s}. {} passed; {} failed; {} ignored; finished in {:.2}s",
+                        //     run_stats.passed,
+                        //     run_stats.failed,
+                        //     run_stats.skipped,
+                        //     elapsed.as_secs_f64()
+                        // )
+                        // .map_err(WriteEventError::Io)?;
+                    }
+                    TestEvent::TestStarted { .. } => {}
+                    TestEvent::TestSlow { .. } => {}
+                    TestEvent::TestSkipped { .. } => {}
+                    TestEvent::RunBeginCancel { .. } => {}
+                    TestEvent::RunPaused { .. } => {}
+                    TestEvent::RunContinued { .. } => {}
+                }
+
+                stdout.flush().map_err(WriteEventError::Io)?;
+                stderr.flush().map_err(WriteEventError::Io)?;
             }
             ReporterStderrImpl::Buffer(buf) => {
                 self.inner
@@ -585,10 +675,10 @@ impl<'a> TestReporterImpl {
 
                 write!(writer, "{:>12} ", "Canceling".style(self.styles.fail))?;
                 let reason_str = match reason {
-                    CancelReason::TestFailure => "test failure",
-                    CancelReason::ReportError => "error",
+                    // CancelReason::TestFailure => "test failure",
+                    // CancelReason::ReportError => "error",
                     CancelReason::Signal => "signal",
-                    CancelReason::Interrupt => "interrupt",
+                    // CancelReason::Interrupt => "interrupt",
                 };
 
                 writeln!(
@@ -985,7 +1075,6 @@ pub(crate) enum TestEvent<'a> {
     TestStarted {
         // /// The test instance that was started.
         // test_instance: TestInstance,
-
         /// Current run statistics so far.
         current_stats: RunStats,
 
@@ -1088,17 +1177,17 @@ pub(crate) enum TestEvent<'a> {
 /// The reason why a test run is being cancelled.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum CancelReason {
-    /// A test failed and --no-fail-fast wasn't specified.
-    TestFailure,
+    // /// A test failed and --no-fail-fast wasn't specified.
+    // TestFailure,
 
-    /// An error occurred while reporting results.
-    ReportError,
+    // /// An error occurred while reporting results.
+    // ReportError,
 
     /// A termination signal (on Unix, SIGTERM or SIGHUP) was received.
     Signal,
 
-    /// An interrupt (on Unix, Ctrl-C) was received.
-    Interrupt,
+    // /// An interrupt (on Unix, Ctrl-C) was received.
+    // Interrupt,
 }
 
 #[derive(Debug, Default)]

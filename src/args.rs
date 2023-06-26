@@ -26,10 +26,6 @@ pub struct Arguments {
     #[arg(long = "ignored", help = "Run ignored tests")]
     pub ignored: bool,
 
-    /// Run only ignored tests.
-    #[arg(long = "nextest", help = "Use a nextest like output")]
-    pub nextest: bool,
-
     /// Run tests, but not benchmarks.
     #[arg(
         long = "test",

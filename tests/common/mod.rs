@@ -140,14 +140,12 @@ fn conclusion_to_output(c: &Conclusion) -> String {
         num_filtered_out,
         num_passed,
         num_failed,
-        num_ignored,
     } = *c;
     format!(
-        "test result: {}. {} passed; {} failed; {} ignored; {} filtered out;",
+        "test result: {}. {} passed; {} failed; {} filtered out;",
         if num_failed > 0 { "FAILED" } else { "ok" },
         num_passed,
         num_failed,
-        num_ignored,
         num_filtered_out,
     )
 }

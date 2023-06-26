@@ -28,7 +28,6 @@ fn normal() {
             num_filtered_out: 0,
             num_passed: 3,
             num_failed: 0,
-            num_ignored: 0,
         },
         "
             test barro ... ok
@@ -47,7 +46,6 @@ fn filter_one() {
             num_filtered_out: 2,
             num_passed: 1,
             num_failed: 0,
-            num_ignored: 0,
         },
         "test foo ... ok",
     );
@@ -62,7 +60,6 @@ fn filter_two() {
             num_filtered_out: 1,
             num_passed: 2,
             num_failed: 0,
-            num_ignored: 0,
         },
         "
             test barro ... ok
@@ -80,7 +77,6 @@ fn filter_exact() {
             num_filtered_out: 2,
             num_passed: 1,
             num_failed: 0,
-            num_ignored: 0,
         },
         "test bar ... ok",
     );
@@ -95,7 +91,6 @@ fn filter_two_and_skip() {
             num_filtered_out: 2,
             num_passed: 1,
             num_failed: 0,
-            num_ignored: 0,
         },
         "test bar ... ok",
     );
@@ -110,7 +105,6 @@ fn skip_nothing() {
             num_filtered_out: 0,
             num_passed: 3,
             num_failed: 0,
-            num_ignored: 0,
         },
         "
             test barro ... ok
@@ -129,7 +123,6 @@ fn skip_two() {
             num_filtered_out: 2,
             num_passed: 1,
             num_failed: 0,
-            num_ignored: 0,
         },
         "test foo ... ok",
     );
@@ -144,7 +137,6 @@ fn skip_exact() {
             num_filtered_out: 1,
             num_passed: 2,
             num_failed: 0,
-            num_ignored: 0,
         },
         "
             test barro ... ok
@@ -162,7 +154,6 @@ fn terse_output() {
             num_filtered_out: 0,
             num_passed: 3,
             num_failed: 0,
-            num_ignored: 0,
         }
     );
     assert_log!(
