@@ -106,13 +106,13 @@ pub use crate::args::{Arguments, ColorSetting, FormatSetting};
 /// compare the panic payload to an expected value anyway.
 pub struct Trial {
     runner: Box<dyn FnOnce(&'static Context) -> Box<dyn Future<Output = ()> + Send> + Send>,
-    requires: Vec<TypeId>,
+    requires: Vec<(&'static str, TypeId)>,
     info: TestInfo,
 }
 
 pub trait TestFn<T>: Clone + Send + Sized + 'static {
     fn call(self, context: &'static Context) -> Pin<Box<dyn Future<Output = ()> + Send>>;
-    fn requires(&self) -> Vec<TypeId>;
+    fn requires(&self) -> Vec<(&'static str, TypeId)>;
 }
 
 macro_rules! impl_handler {
@@ -135,8 +135,8 @@ macro_rules! impl_handler {
                     self($($ty),*).await;
                 })
             }
-            fn requires(&self) -> Vec<TypeId> {
-                vec![$(TypeId::of::<$ty>()),*]
+            fn requires(&self) -> Vec<(&'static str, TypeId)> {
+                vec![$((std::any::type_name::<$ty>(), TypeId::of::<$ty>())),*]
             }
         }
     };
@@ -152,7 +152,7 @@ where
             self().await;
         })
     }
-    fn requires(&self) -> Vec<TypeId> {
+    fn requires(&self) -> Vec<(&'static str, TypeId)> {
         vec![]
     }
 }
@@ -224,7 +224,7 @@ impl Trial {
 // struct Config {}
 
 // type AnyOwnedVal = Box<dyn std::any::Any + Send + Sync + 'static>;
-type AnySharedVal = Arc<dyn std::any::Any + Send + Sync + 'static>;
+type AnySharedVal = Arc<dyn std::any::Any + Send + Sync>;
 
 struct Setup {
     // type_id: fn() -> &'static TypeId,
@@ -237,7 +237,7 @@ struct Setup {
 }
 
 impl Context {
-    async fn get<T: 'static>(&self) -> Option<&T> {
+    async fn get<T: 'static>(&'static self) -> Option<&'static T> {
         let id = TypeId::of::<T>();
         match self.values.get(&id) {
             Some(s) => Some(s.get().await),
@@ -247,60 +247,20 @@ impl Context {
 }
 
 impl Setup {
-    async fn get<T: 'static>(&self) -> &T {
-        self.value
+    async fn get<T: 'static>(&'static self) -> &'static T {
+        // &** is necessary... trust me
+        // get_or_init returns &Arc<T>
+        // first  * removes outer ref -> Arc<T>
+        // second * removes Arc       -> T
+        // final  & makes a ref again -> &T
+        let x: &'static dyn std::any::Any = &**self
+            .value
             .get_or_init(|| async { (self.setup)().await.unwrap() })
-            .await
-            .downcast_ref()
-            .unwrap()
+            .await;
+
+        x.downcast_ref().unwrap()
     }
 }
-
-struct SetupInit {
-    type_id: fn() -> TypeId,
-    module: &'static str,
-    // function: &'static str,
-    // file: &'static str,
-    // line: u32,
-    setup: fn() -> tokio::task::JoinHandle<AnySharedVal>,
-}
-
-// enum MaybeSetupInit {
-//     // /// should be called many times
-//     // Ephemeral(fn() -> tokio::task::JoinHandle<AnyOwnedVal>),
-//     /// should be called once
-//     SharedInit(fn() -> tokio::task::JoinHandle<AnySharedVal>),
-// }
-// enum MaybeSetup {
-//     // /// should be called many times
-//     // Ephemeral(fn() -> tokio::task::JoinHandle<AnyOwnedVal>),
-//     /// should be called once
-//     SharedInit(fn() -> tokio::task::JoinHandle<AnySharedVal>),
-//     // /// called once and waiting
-//     // Running(tokio::task::JoinHandle<AnySharedVal>),
-//     /// done
-//     Done(AnySharedVal),
-// }
-
-inventory::collect!(SetupInit);
-
-// fn setup_config() -> tokio::task::JoinHandle<AnySharedVal> {
-//     inventory::submit! {
-//         SetupInit {
-//             type_id: TypeId::of::<Config>,
-//             module: module_path!(),
-//             // function: "setup_config",
-//             // file: file!(),
-//             // line: line!()
-//             // setup: MaybeSetupInit::SharedInit(setup_config),
-//         }
-//     }
-
-//     async fn __inner() -> Config {
-//         Config {}
-//     }
-//     tokio::spawn(async { Arc::new(__inner().await) as Arc<_> })
-// }
 
 pub struct Context {
     values: HashMap<TypeId, Arc<Setup>>,
@@ -308,11 +268,32 @@ pub struct Context {
 
 #[derive(Clone)]
 pub struct Tester {
+    context: &'static Context,
     inner: Arc<Mutex<TesterInner>>,
 }
 
 impl Tester {
     pub fn add(&self, trial: Trial) {
+        let mut missing = vec![];
+        for (ty, id) in &trial.requires {
+            if !self.context.values.contains_key(id) {
+                missing.push(ty);
+            }
+        }
+
+        if !missing.is_empty() {
+            let mut types = String::new();
+            for missing in missing {
+                types += "\n\t";
+                types += missing;
+            }
+
+            panic!(
+                "Test '{}' is missing required setup methods for:{}",
+                trial.info.name, types
+            );
+        }
+
         self.inner.lock().unwrap().tasks.push(trial)
     }
 }
@@ -322,7 +303,23 @@ struct TesterInner {
 }
 
 mod builder {
-    use crate::Tester;
+    use std::{any::TypeId, marker::PhantomData};
+
+    use crate::{AnySharedVal, Tester};
+
+    pub trait TestRequirement<T> {}
+
+    pub struct Setup<T>(PhantomData<T>);
+
+    pub struct SetupInit {
+        pub type_id: fn() -> TypeId,
+        pub module: &'static str,
+        // function: &'static str,
+        // file: &'static str,
+        // line: u32,
+        pub setup: fn() -> tokio::task::JoinHandle<AnySharedVal>,
+    }
+    inventory::collect!(SetupInit);
 
     pub struct TestBuilder(pub fn(tester: Tester));
     inventory::collect!(TestBuilder);
@@ -331,11 +328,11 @@ mod builder {
 // inventory::submit! {TestBuilder(foo)}
 // fn foo(mut tester: Tester) {}
 
-fn setup_tests() -> (Tester, Context) {
+fn setup_tests() -> (Vec<Trial>, &'static Context) {
     let mut context = Context {
         values: HashMap::new(),
     };
-    for setup in inventory::iter::<SetupInit>() {
+    for setup in inventory::iter::<builder::SetupInit>() {
         context.values.insert(
             (setup.type_id)(),
             Arc::new(Setup {
@@ -348,13 +345,16 @@ fn setup_tests() -> (Tester, Context) {
             }),
         );
     }
+    let context: &'static Context = Box::leak(Box::new(context));
     let tester = Tester {
+        context,
         inner: Arc::new(Mutex::new(TesterInner { tasks: vec![] })),
     };
     for builder in inventory::iter::<builder::TestBuilder>() {
         (builder.0)(tester.clone())
     }
-    (tester, context)
+    let tasks = std::mem::take(&mut tester.inner.lock().unwrap().tasks);
+    (tasks, context)
 }
 
 #[derive(Debug, Clone)]
@@ -481,23 +481,20 @@ pub fn main() {
 pub fn run(args: &Arguments) -> Conclusion {
     let start_instant = SystemTime::now();
 
-    let (tester, context) = setup_tests();
+    let (mut tests, context) = setup_tests();
 
     // If `--list` is specified, just print the list and return.
     if args.list {
-        let mut tests = tester.inner.lock().unwrap();
         if !args.filter.is_empty() || !args.skip.is_empty() || args.ignored {
-            tests
-                .tasks
-                .retain(|test| args.is_filtered_out(test).is_none());
+            tests.retain(|test| args.is_filtered_out(test).is_none());
         }
 
         let mut printer = printer::Printer::new(args);
-        printer.print_list(&tests.tasks, args.ignored);
+        printer.print_list(&tests, args.ignored);
         return Conclusion::empty();
     }
 
-    run_nextest(args, start_instant, tester, context)
+    run_nextest(args, start_instant, tests, context)
 }
 
 struct Location {
@@ -513,14 +510,11 @@ thread_local! {
 fn run_nextest(
     args: &Arguments,
     start_instant: SystemTime,
-    tester: Tester,
-    context: Context,
+    mut tests: Vec<Trial>,
+    context: &'static Context,
 ) -> Conclusion {
-    let context: &'static Context = Box::leak(Box::new(context));
-    let mut tests = tester.inner.lock().unwrap();
-
     let test_list = TestList {
-        tests: tests.tasks.iter().map(|x| x.info.clone()).collect(),
+        tests: tests.iter().map(|x| x.info.clone()).collect(),
         skip_count: OnceLock::new(),
     };
 
@@ -591,7 +585,7 @@ fn run_nextest(
     }
 
     let mut stats = RunStats {
-        initial_run_count: tests.tasks.len(),
+        initial_run_count: tests.len(),
         finished_count: 0,
         passed: 0,
         passed_slow: 0,
@@ -624,7 +618,7 @@ fn run_nextest(
         })
         .unwrap();
 
-    for test in tests.tasks.drain(..) {
+    for test in tests.drain(..) {
         if let Some(reason) = args.is_filtered_out(&test) {
             reporter
                 .report_event(TestEvent::TestSkipped {
@@ -680,7 +674,6 @@ fn run_nextest(
     let mut running = 0;
     runtime.block_on(async {
         loop {
-            // don't log
             let msg = rx.recv().await;
 
             match msg {
@@ -824,12 +817,14 @@ impl Future for CatchUnwind {
 
 #[macro_export]
 macro_rules! test {
-    ($vis:vis async fn $name:ident() $body:block) => {
-        $vis async fn $name() {
+    ($vis:vis async fn $name:ident($($arg:ident: $arg_ty:ty),* $(,)?) $body:block) => {
+        $vis async fn $name($($arg: $arg_ty),*) {
             {
-                $crate::__sus::inventory::submit! { $crate::__sus::TestBuilder(test_builder) }
-                fn test_builder(tester: $crate::Tester) {
-                    tester.add($crate::Trial::test(stringify!($name), || async { $body }));
+                $($crate::__sus::has_setup_fn::<_, $arg_ty>();)*
+                $crate::__sus::inventory::submit! {
+                    $crate::__sus::TestBuilder(
+                        |tester: $crate::Tester| tester.add($crate::Trial::test(stringify!($name), $name))
+                    )
                 }
             }
             {
@@ -853,8 +848,51 @@ macro_rules! tests {
     };
 }
 
+#[macro_export]
+macro_rules! setup {
+    ($(#[$meta:meta])* $vis:vis async fn $name:ident() -> $setup:ty $body:block) => {
+        #[doc(hidden)]
+        #[allow(non_camel_case_types)]
+        $vis struct $name {}
+        #[doc(hidden)]
+        const _: () = {
+            use $crate::__sus::{TestRequirement, Setup};
+
+            impl TestRequirement<$name> for Setup<&$setup> {}
+        };
+        $(#[$meta])* $vis async fn $name() -> $setup {
+            {
+                $crate::__sus::inventory::submit! {
+                    $crate::__sus::SetupInit{
+                        type_id: $crate::__sus::TypeId::of::<$setup>,
+                        module: $crate::__sus::module_path!(),
+                        setup: || $crate::__sus::spawn(async {
+                            let x: $setup = $name().await;
+                            $crate::__sus::Arc::new(x) as $crate::__sus::Arc<_>
+                        }),
+                    }
+                }
+            }
+            {
+                $body
+            }
+        }
+    };
+}
+
 #[doc(hidden)]
 pub mod __sus {
+    pub use crate::builder::SetupInit;
     pub use crate::builder::TestBuilder;
+    pub use crate::builder::{Setup, TestRequirement};
     pub use inventory;
+    pub use std::sync::Arc;
+    pub use std::{any::TypeId, module_path};
+    pub use tokio::task::spawn;
+
+    pub fn has_setup_fn<T, S>()
+    where
+        Setup<S>: TestRequirement<T>,
+    {
+    }
 }

@@ -9,12 +9,20 @@ fn main() {
 
 // Tests
 
+struct Config {}
+
+async_test::setup!(
+    async fn config() -> Config {
+        Config {}
+    }
+);
+
 async_test::test!(
     async fn check_foo() {}
 );
 
 async_test::test!(
-    async fn check_bar() {}
+    async fn check_bar(_c: &Config) {}
 );
 
 async_test::test!(
