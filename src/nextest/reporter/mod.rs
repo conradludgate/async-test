@@ -562,7 +562,6 @@ struct TestReporterImpl {
     status_level: StatusLevel,
     force_success_output: Option<TestOutputDisplay>,
     force_failure_output: Option<TestOutputDisplay>,
-    // binary_id_width: usize,
     final_status_level: FinalStatusLevel,
     styles: Box<Styles>,
     cancel_status: Option<CancelReason>,
@@ -886,8 +885,6 @@ impl<'a> TestReporterImpl {
     }
 
     fn write_instance(&self, instance: &TestInstance, writer: &mut impl Write) -> io::Result<()> {
-        write!(writer, "{:>width$} ", "test_suite", width = 4)?;
-
         write_test_name(&instance.name, &self.styles.list_styles, writer)
     }
 
@@ -935,7 +932,7 @@ impl<'a> TestReporterImpl {
             write!(
                 writer,
                 "{:width$}",
-                "STDOUT:".style(header_style),
+                "ERROR:".style(header_style),
                 width = 21
             )?;
             self.write_instance(test_instance, writer)?;
@@ -943,23 +940,6 @@ impl<'a> TestReporterImpl {
 
             self.write_test_output(output.as_bytes(), writer)?;
         }
-
-        // if !run_status.stderr.is_empty() {
-        //     write!(writer, "\n{}", "--- ".style(header_style))?;
-        //     let out_len = self.write_attempt(run_status, header_style, writer)?;
-        //     // The width is to align test instances.
-        //     write!(
-        //         writer,
-        //         "{:width$}",
-        //         "STDERR:".style(header_style),
-        //         width = (21 - out_len)
-        //     )?;
-        //     self.write_instance(test_instance.clone(), writer)?;
-        //     writeln!(writer, "{}", " ---".style(header_style))?;
-
-        //     self.write_test_output(&run_status.stderr, writer)?;
-        // }
-
         writeln!(writer)
     }
 
@@ -971,12 +951,11 @@ impl<'a> TestReporterImpl {
             writer.write_all(output)?;
             writer.write_all(RESET_COLOR)?;
         } else {
-            // // Strip ANSI escapes from the output if nextest itself isn't colorized.
-            // let mut no_color = strip_ansi_escapes::Writer::new(writer);
-            // no_color.write_all(output)?;
+            // Strip ANSI escapes from the output if nextest itself isn't colorized.
+            let mut no_color = strip_ansi_escapes::Writer::new(&mut *writer);
+            no_color.write_all(output)?;
         }
-
-        Ok(())
+        writeln!(writer)
     }
 
     // // Returns the number of characters written out to the screen.
