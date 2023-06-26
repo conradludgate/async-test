@@ -211,7 +211,7 @@ impl TestReporterBuilder {
         let styles = Box::default();
         let aggregator = EventAggregator::new();
 
-        let status_level = self.status_level.unwrap_or(StatusLevel::All);
+        let status_level = self.status_level.unwrap_or(StatusLevel::Pass);
         let final_status_level = self.final_status_level.unwrap_or(FinalStatusLevel::Slow);
 
         let force_success_output = self.success_output;
