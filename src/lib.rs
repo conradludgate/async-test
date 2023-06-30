@@ -77,7 +77,7 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     process,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Mutex},
     task::Poll,
     time::{Duration, SystemTime},
 };
@@ -93,6 +93,8 @@ use tokio::sync::Semaphore;
 
 pub use crate::args::{Arguments, ColorSetting, FormatSetting};
 
+type Fut = Pin<Box<dyn 'static + Send + Future<Output = ()>>>;
+type Fun = Box<dyn 'static + Send + FnOnce(&'static Context) -> Fut>;
 /// A single test.
 ///
 /// The original `libtest` often calls benchmarks "tests", which is a bit
@@ -105,14 +107,29 @@ pub use crate::args::{Arguments, ColorSetting, FormatSetting};
 /// `#[should_panic]` you need to catch the panic yourself. You likely want to
 /// compare the panic payload to an expected value anyway.
 pub struct Trial {
-    runner: Box<dyn FnOnce(&'static Context) -> Box<dyn Future<Output = ()> + Send> + Send>,
+    runner: Option<Fun>,
     requires: Vec<(&'static str, TypeId)>,
     info: TestInfo,
 }
 
 pub trait TestFn<T>: Clone + Send + Sized + 'static {
-    fn call(self, context: &'static Context) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    fn call(self, context: &'static Context) -> Fut;
     fn requires(&self) -> Vec<(&'static str, TypeId)>;
+}
+
+impl<F, Fut2> TestFn<((),)> for F
+where
+    F: FnOnce() -> Fut2 + Clone + Send + 'static,
+    Fut2: Future<Output = ()> + Send + 'static,
+{
+    fn call(self, context: &'static Context) -> Fut {
+        Box::pin(async move {
+            self().await;
+        })
+    }
+    fn requires(&self) -> Vec<(&'static str, TypeId)> {
+        vec![]
+    }
 }
 
 macro_rules! impl_handler {
@@ -120,13 +137,13 @@ macro_rules! impl_handler {
         [$($ty:ident),*]
     ) => {
         #[allow(non_snake_case, unused_mut)]
-        impl<F, Fut, $($ty,)*> TestFn<($($ty,)* ())> for F
+        impl<F, Fut2, $($ty,)*> TestFn<($($ty,)* ())> for F
         where
-            F: FnOnce($(&'static $ty),*) -> Fut + Clone + Send + 'static,
-            Fut: Future<Output = ()> + Send,
+            F: FnOnce($(&'static $ty),*) -> Fut2 + Clone + Send + 'static,
+            Fut2: Future<Output = ()> + Send + 'static,
             $($ty: 'static + Sync + Send,)*
         {
-            fn call(self, context: &'static Context) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            fn call(self, context: &'static Context) -> Fut {
                 Box::pin(async move {
                     $(
                         let $ty: &'static $ty = context.get().await.unwrap();
@@ -142,22 +159,6 @@ macro_rules! impl_handler {
     };
 }
 
-impl<F, Fut> TestFn<((),)> for F
-where
-    F: FnOnce() -> Fut + Clone + Send + 'static,
-    Fut: Future<Output = ()> + Send,
-{
-    fn call(self, context: &'static Context) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-        Box::pin(async move {
-            self().await;
-        })
-    }
-    fn requires(&self) -> Vec<(&'static str, TypeId)> {
-        vec![]
-    }
-}
-
-// impl_handler!([]);
 impl_handler!([T1]);
 impl_handler!([T1, T2]);
 impl_handler!([T1, T2, T3]);
@@ -186,7 +187,7 @@ impl Trial {
     {
         Self {
             requires: runner.requires(),
-            runner: Box::new(move |ctx| Box::new(runner.call(ctx))),
+            runner: Some(Box::new(move |ctx| Box::pin(runner.call(ctx)))),
             info: TestInfo {
                 name: name.into(),
                 is_ignored: false,
@@ -494,7 +495,7 @@ pub fn run(args: &Arguments) -> Conclusion {
         return Conclusion::empty();
     }
 
-    run_nextest(args, start_instant, tests, context)
+    run_nextest(args, start_instant, &mut tests, context)
 }
 
 struct Location {
@@ -510,13 +511,160 @@ thread_local! {
 fn run_nextest(
     args: &Arguments,
     start_instant: SystemTime,
-    mut tests: Vec<Trial>,
+    tests: &mut [Trial],
     context: &'static Context,
 ) -> Conclusion {
-    let test_list = TestList {
-        tests: tests.iter().map(|x| x.info.clone()).collect(),
-        skip_count: OnceLock::new(),
+    let mut test_list = TestList {
+        tests: vec![],
+        skip_count: 0,
     };
+
+    let conclusion = Conclusion::empty();
+
+    let threads = match args.test_threads.and_then(NonZeroUsize::new) {
+        None => std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap()),
+        Some(num_threads) => num_threads,
+    };
+
+    let mut runtime;
+
+    match threads.get() {
+        1 => runtime = tokio::runtime::Builder::new_current_thread(),
+        num_threads => {
+            runtime = tokio::runtime::Builder::new_multi_thread();
+            runtime.worker_threads(num_threads - 1);
+        }
+    };
+
+    let runtime = runtime.enable_all().build().unwrap();
+
+    let tasks = match args.test_tasks.and_then(NonZeroUsize::new) {
+        Some(tasks) => tasks,
+        None => threads,
+    };
+
+    #[derive(Debug)]
+    enum TestState {
+        Skipped {
+            name: String,
+            reason: MismatchReason,
+        },
+        Start {},
+        StartSetup {},
+        DoneSetup {
+            name: String,
+            start: SystemTime,
+        },
+        Done {
+            start: SystemTime,
+            outcome: Outcome,
+            info: TestInfo,
+            slow: bool,
+        },
+        Tick {
+            elapsed: Duration,
+            info: TestInfo,
+        },
+    }
+
+    let slow_period = Duration::from_secs(15);
+
+    let semaphore = Arc::new(Semaphore::new(tasks.get()));
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    let mut stats = RunStats::default();
+
+    // don't log panics, catch and record them instead
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let bt = std::backtrace::Backtrace::capture();
+        let location = info.location().map(|loc| Location {
+            file: loc.file().to_owned(),
+            line: loc.line(),
+            column: loc.column(),
+        });
+        BT.with(|x| x.set((bt, location)));
+    }));
+
+    for test in tests.iter_mut() {
+        if let Some(reason) = args.is_filtered_out(&test) {
+            stats.skipped += 1;
+            test_list.skip_count += 1;
+        } else {
+            stats.initial_run_count += 1;
+            test_list.tests.push(test.info.clone());
+
+            let req_len = test.requires.len() as u32;
+            let wg = Arc::new(Semaphore::new(req_len as usize));
+
+            for (requirement, id) in &test.requires {
+                if let Some(s) = context.values.get(&id) {
+                    let tx = tx.clone();
+                    let permit = semaphore.clone().acquire_owned();
+                    let wg_permit = wg.clone().try_acquire_owned().unwrap();
+                    runtime.spawn(async move {
+                        let _wg_permit = wg_permit;
+                        s.value
+                            .get_or_init(move || async move {
+                                let _permit = permit.await.unwrap();
+                                let start = SystemTime::now();
+
+                                tx.send(TestState::StartSetup {}).unwrap();
+                                let res = (s.setup)().await.unwrap();
+                                tx.send(TestState::DoneSetup {
+                                    name: s.function.to_owned(),
+                                    start,
+                                })
+                                .unwrap();
+                                res
+                            })
+                            .await;
+                    });
+                }
+            }
+
+            let tx = tx.clone();
+            let permit = semaphore.clone().acquire_owned();
+            let runner = test.runner.take().unwrap();
+            let task = runner(context);
+            let info = test.info.clone();
+            let test_task = async move {
+                let _wg_permit = wg.acquire_many_owned(req_len).await.unwrap();
+                let _permit = permit.await.unwrap();
+                let start = SystemTime::now();
+
+                let mut test_task = std::pin::pin!(CatchUnwind(task));
+
+                tx.send(TestState::Start {}).unwrap();
+                for i in 1.. {
+                    let res = tokio::time::timeout(slow_period, test_task.as_mut()).await;
+                    match res {
+                        Err(_) => {
+                            tx.send(TestState::Tick {
+                                elapsed: i * slow_period,
+                                info: info.clone(),
+                            })
+                            .unwrap();
+                        }
+                        Ok(outcome) => {
+                            tx.send(TestState::Done {
+                                start,
+                                outcome,
+                                info,
+                                slow: i > 1,
+                            })
+                            .unwrap();
+
+                            break;
+                        }
+                    }
+                }
+            };
+            runtime.spawn(test_task);
+        }
+    }
+
+    drop(tx);
 
     let mut output = args
         .logfile
@@ -545,167 +693,11 @@ fn run_nextest(
         ColorSetting::Never => {}
     }
 
-    let conclusion = Conclusion::empty();
-
-    let threads = match args.test_threads.and_then(NonZeroUsize::new) {
-        None => std::thread::available_parallelism().unwrap_or(NonZeroUsize::new(1).unwrap()),
-        Some(num_threads) => num_threads,
-    };
-
-    let mut runtime;
-
-    match threads.get() {
-        1 => runtime = tokio::runtime::Builder::new_current_thread(),
-        num_threads => {
-            runtime = tokio::runtime::Builder::new_multi_thread();
-            runtime.worker_threads(num_threads - 1);
-        }
-    };
-
-    let runtime = runtime.enable_all().build().unwrap();
-
-    let tasks = match args.test_tasks.and_then(NonZeroUsize::new) {
-        Some(tasks) => tasks,
-        None => threads,
-    };
-
-    #[derive(Debug)]
-    enum TestState {
-        Start {},
-        StartSetup {},
-        DoneSetup {
-            name: String,
-            start: SystemTime,
-        },
-        Done {
-            start: SystemTime,
-            outcome: Outcome,
-            info: TestInfo,
-            slow: bool,
-        },
-        Tick {
-            elapsed: Duration,
-            info: TestInfo,
-        },
-    }
-
-    let mut stats = RunStats {
-        initial_run_count: tests.len(),
-        finished_count: 0,
-        passed: 0,
-        passed_slow: 0,
-        failed: 0,
-        failed_slow: 0,
-        timed_out: 0,
-        skipped: 0,
-    };
-
-    let slow_period = Duration::from_secs(15);
-
-    let semaphore = Arc::new(Semaphore::new(tasks.get()));
-    let (tx, mut rx) = tokio::sync::mpsc::channel(tasks.get() * 4);
-
-    // don't log panics, catch and record them instead
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        let bt = std::backtrace::Backtrace::capture();
-        let location = info.location().map(|loc| Location {
-            file: loc.file().to_owned(),
-            line: loc.line(),
-            column: loc.column(),
-        });
-        BT.with(|x| x.set((bt, location)));
-    }));
-
     reporter
         .report_event(TestEvent::RunStarted {
             test_list: &test_list,
         })
         .unwrap();
-
-    for test in tests.drain(..) {
-        if let Some(reason) = args.is_filtered_out(&test) {
-            reporter
-                .report_event(TestEvent::TestSkipped {
-                    test_instance: TestInstance {
-                        name: test.info.name,
-                    },
-                    reason,
-                })
-                .unwrap();
-            stats.skipped += 1;
-        } else {
-            let req_len = test.requires.len() as u32;
-            let wg = Arc::new(Semaphore::new(req_len as usize));
-
-            for (requirement, id) in test.requires {
-                if let Some(s) = context.values.get(&id) {
-                    let tx = tx.clone();
-                    let permit = semaphore.clone().acquire_owned();
-                    let wg_permit = wg.clone().try_acquire_owned().unwrap();
-                    runtime.spawn(async move {
-                        let _wg_permit = wg_permit;
-                        s.value
-                            .get_or_init(move || async move {
-                                let _permit = permit.await.unwrap();
-                                let start = SystemTime::now();
-
-                                tx.send(TestState::StartSetup {}).await.unwrap();
-                                let res = (s.setup)().await.unwrap();
-                                tx.send(TestState::DoneSetup {
-                                    name: s.function.to_owned(),
-                                    start,
-                                })
-                                .await
-                                .unwrap();
-                                res
-                            })
-                            .await;
-                    });
-                }
-            }
-
-            let tx = tx.clone();
-            let permit = semaphore.clone().acquire_owned();
-            let test_task = async move {
-                let _wg_permit = wg.acquire_many_owned(req_len).await.unwrap();
-                let _permit = permit.await.unwrap();
-                let start = SystemTime::now();
-
-                let mut test_task = std::pin::pin!(CatchUnwind((test.runner)(context).into()));
-
-                tx.send(TestState::Start {}).await.unwrap();
-                for i in 1.. {
-                    let res = tokio::time::timeout(slow_period, test_task.as_mut()).await;
-                    match res {
-                        Err(_) => {
-                            tx.send(TestState::Tick {
-                                elapsed: i * slow_period,
-                                info: test.info.clone(),
-                            })
-                            .await
-                            .unwrap();
-                        }
-                        Ok(outcome) => {
-                            tx.send(TestState::Done {
-                                start,
-                                outcome,
-                                info: test.info,
-                                slow: i > 1,
-                            })
-                            .await
-                            .unwrap();
-
-                            break;
-                        }
-                    }
-                }
-            };
-            runtime.spawn(test_task);
-        }
-    }
-
-    drop(tx);
 
     let mut running = 0;
     runtime.block_on(async {
@@ -713,6 +705,14 @@ fn run_nextest(
             let msg = rx.recv().await;
 
             match msg {
+                Some(TestState::Skipped { name, reason }) => {
+                    reporter
+                        .report_event(TestEvent::TestSkipped {
+                            test_instance: TestInstance { name },
+                            reason,
+                        })
+                        .unwrap();
+                }
                 Some(TestState::StartSetup {}) => {}
                 Some(TestState::DoneSetup { name, start }) => {
                     reporter
